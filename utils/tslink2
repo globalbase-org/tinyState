@@ -1,0 +1,688 @@
+#!/usr/bin/perl
+
+use strict vars;
+use strict subs;
+
+use DB_File;
+use Fcntl;
+use Carp;
+use FindBin;
+use Getopt::Long;
+use Data::Dumper;
+
+my $opt_header = "";
+my $opt_baseheader = "";
+my $opt_nm = "ub";
+
+GetOptions(
+    'header=s' => \$opt_header,
+    'baseheader=s' => \$opt_baseheader,
+    'nm=s' => \$opt_nm
+        );
+
+my $cmd = $ARGV[0];
+my $table_file = $ARGV[1];
+my $filename = $ARGV[2];
+
+
+my $opened_file;
+my $closed_file;
+my $public_file;
+
+sub get_tmp
+{
+    my $filename = $_[0];
+    if ( $filename =~ m/(.*)\/([^\/]+)$/ ) {
+	my $dir = $1;
+	my $fn = $2;
+	return "$dir/.$fn";
+    }
+    else {
+	return ".".$filename;
+    }
+}
+
+sub copy_tmp
+{
+    my $from = $_[0];
+    my $to = $_[1];
+
+    if ( !(-e $to) ) {
+	system("mv $from $to");
+	return;
+    }
+
+    open(IN,"<$from");
+    my $from_data = "";
+    while(<IN>) {
+	$from_data .= $_;
+    }
+    close(IN);
+
+    open(IN,"<$to");
+    my $to_data = "";
+    while(<IN>) {
+	$to_data .= $_;
+    }
+    if ( $from_data eq $to_data ) {
+	system("rm $from");
+	return;
+    }
+    system("rm $to");
+    system("mv $from $to");
+}
+
+
+sub set_filename
+{
+    my $trunc;
+    if ( $opt_header eq "" ) {
+	$filename =~ m/^(.*)\.c$/;
+	$trunc = $1;
+    }
+    else {
+	if ( $filename =~ m/\// ) {
+	    $filename =~ m/\/([^\/]*)\.c$/;
+	    $trunc = $opt_baseheader."/".$opt_header."/c/".$1;
+	}
+	else {
+	    $filename =~ m/^(.*)\.c$/;
+	    $trunc = $opt_baseheader."/".$opt_header."/c/".$1;
+	}
+	system("mkdir -p $opt_baseheader/$opt_header/c");
+    }
+    $opened_file = $trunc."_op.h";
+    $closed_file = $trunc."_cs.h";
+    $public_file = $trunc."_pb.h";
+}
+
+sub output_cs_file
+{
+    my $className = $_[0];
+    my $baseclassName = $_[1];
+    my $states = $_[2];
+    my $ix;
+    my $public_count = 0;
+    my $el_length = int(($#$states+1)*1.5);
+    if ( ($el_length % 2) == 0 ) {
+	$el_length ++;
+    }
+
+    my $baseclassPtr;
+    if ( $baseclassName eq "" ) {
+	$baseclassPtr = "0";
+    }
+    else {
+	$baseclassPtr = "&class_".$baseclassName;
+    }
+    local(*OUT);
+
+    my $closed_tmp = get_tmp($closed_file);
+    open(OUT,">$closed_tmp") or die "cannot open the file $closed_file";
+
+    print OUT
+'
+#ifndef ___CLASS_CS_'.$className.'___
+#define ___CLASS_CS_'.$className.'___
+
+#include "ts2/c/tinyState.h"
+#include "'.$opt_header."/c/".$className.'_op.h"
+
+';
+    foreach ( @$states ) {
+	my $var = $_;
+	if ( $var =~ m/^public_/ ) {
+	    print OUT "static INTPTR $var();\n";
+	    $public_count ++;
+	}
+	else {
+	    print OUT "static INTPTR state_$var();\n";
+	}
+    }
+
+    print OUT
+'
+
+TS_STATE_ELEMENT stateTbl_'.$className.'[] = {
+';
+    $ix = 0;
+    foreach ( @$states ) {
+	my $org = $_;
+	my $var = $org;
+	$var =~ s/^public_/PUB_/;
+	my $func = $org;
+	if ( !($func =~ m/^public_/) ) {
+	    $func = "state_".$func;
+	}
+	print OUT "\t{$func,$var,0}";
+	$ix ++;
+	if ( $ix != $el_length ) {
+	    print OUT ",\n";
+	}
+	else {
+	    print OUT "\n";
+	}
+    }
+    for ( ; $ix < $el_length-1 ; $ix ++ ) {
+	print OUT "\t{0,0,0},\n"
+    }
+    if ( $ix < $el_length ) {
+	print OUT "\t{0,0,0}\n";
+    }
+    print OUT "};\n\n";
+
+    print OUT '
+/* '.($#$states+1).' states and PUBs */
+
+';
+
+    print OUT
+'TS_CLASS class_'.$className.' = {
+        "'.$className.'",
+        '.$baseclassPtr.',
+        &stateTbl_'.$className.'[0],
+        '.$el_length.'
+};
+
+#endif /* ___CLASS_CS_'.$className.'___ */
+';
+    close(OUT);
+
+    copy_tmp($closed_tmp,$closed_file);
+}
+
+
+sub output_op_file
+{
+    my $className = $_[0];
+    my $baseclassName = $_[1];
+    my $states = $_[2];
+    my $typedefLines = $_[3];
+    my $ix;
+
+    local(*OUT);
+    my $opened_tmp = get_tmp($opened_file);
+    open(OUT,">$opened_tmp") or die "cannot open the file $opened_file";
+
+    print OUT
+'
+#ifndef ___CLASS_OP_'.$className.'___
+#define ___CLASS_OP_'.$className.'___
+
+#include "ts2/c/tinyState.h"
+';
+    if ( $baseclassName ) {
+	print OUT
+'#include "'.$opt_header."/c/".$baseclassName.'_op.h"
+
+extern TS_CLASS class_'.$baseclassName.';
+
+';
+    }
+    else {
+	print OUT "\n";
+    }
+
+    foreach ( @$states ) {
+	my $org = $_;
+	my $var = $org;
+	if ( $var =~ m/^public_/ ) {
+	    next;
+	}
+	print OUT
+'#ifndef '.$var.'
+extern TS_TRANS trans_'.$var.';
+#define '.$var.' ((TS_STATE_TYPE)&trans_'.$var.')
+#endif
+';
+    }
+
+    print OUT '
+/* '.($#$states+1).' states and PUBs */
+
+';
+
+    print OUT '
+#ifdef ___TS_OBJECT_TYPEDEF
+#undef ___TS_OBJECT_TYPEDEF
+#endif
+';
+    if ( $baseclassName eq "" ) {
+	print OUT '#define _TS_OBJECT_'.$className.' '."\\\n".join("\\\n",@$typedefLines)."\n";
+    }
+    else {
+	print OUT '#define _TS_OBJECT_'.$className.' '."\\\n\t".'_TS_OBJECT_'.$baseclassName.
+	    ';'."\\\n".join("\\\n",@$typedefLines)."\n";
+    }
+    print OUT 
+'#define ___TS_OBJECT_TYPEDEF typedef struct ts_current_object { _TS_OBJECT_'.$className.' } TS_CURRENT_OBJECT; \
+typedef struct ts_object_'.$className.' { _TS_OBJECT_'.$className.' } TS_OBJECT_'.$className.';
+
+#ifdef TS_CURRENT_CLASS
+#undef TS_CURRENT_CLASS
+#endif
+#define TS_CURRENT_CLASS class_'.$className.'
+
+#ifdef TS_CURRENT_PUBLIC
+#undef TS_CURRENT_PUBLIC
+#endif
+#define TS_CURRENT_PUBLIC '.$className.'_PUB
+
+
+#endif /* ___CLASS_CS_'.$className.'___ */
+';
+    close(OUT);
+
+    copy_tmp($opened_tmp,$opened_file);
+}
+
+sub output_pb_file
+{
+    my $className = $_[0];
+    my $baseclassName = $_[1];
+    my $states = $_[2];
+    my $typedefPublic = $_[3];
+    my $ix;
+
+    my $public_tmp = get_tmp($public_file);
+    open(OUT,">$public_tmp") or die "cannot open the file $public_file";
+
+    print OUT
+'
+#ifndef ___CLASS_PB_'.$className.'___
+#define ___CLASS_PB_'.$className.'___
+
+#include "ts2/c/tinyState.h"
+
+';
+
+    foreach ( @$states ) {
+	my $org = $_;
+	my $var = $org;
+	if ( !($var =~ s/^public_/PUB_/) ) {
+	    next;
+	}
+	print OUT
+'#ifndef '.$var.'
+extern TS_TRANS trans_'.$var.';
+#define '.$var.' ((TS_STATE_TYPE)&trans_'.$var.')
+#endif
+';
+    }
+
+
+
+    print OUT '
+/* '.($#$states+1).' states and PUBs */
+
+';
+    if ( $baseclassName eq "" ) {
+	print OUT '#define _TS_OBJECT_PUB_'.$className.' '."\\\n".join("\\\n",@$typedefPublic)."\n";
+    }
+    else {
+	print OUT '#define _TS_OBJECT_PUB_'.$className.' '."\\\n\t".'_TS_OBJECT_PUB_'.$baseclassName.
+	    ';'."\\\n".join("\\\n",@$typedefPublic)."\n";
+    }
+    print OUT 'typedef struct '.$className.'_pub { _TS_OBJECT_PUB_'.$className.' } '.$className.'_PUB;
+
+
+extern TS_CLASS class_'.$className.';
+
+#endif /* ___CLASS_PB_'.$className.'___ */
+';
+    close(OUT);
+
+    copy_tmp($public_tmp,$public_file);
+}
+
+
+sub scan_file
+{
+    my @new_states = ();
+    my $class_name;
+    my $baseclass_name;
+    local(*IN);
+    if (!open(IN,"<$filename")) {
+	die "cannot open the file $filename";
+    }
+    my @typedef_lines = ();
+    my @typedef_public = ();
+    my $mode = 0;
+print "SCANFILE\n";
+    while(<IN>) {
+	my $line = $_;
+	$line =~ s/[\n\r]//g;
+	if ( $line =~ m/^TS_NEW_CLASS\(([a-zA-Z0-9_]*),([a-zA-Z0-9_]*)\)/ ) {
+	    if ( defined $class_name ) {
+		die "duplicated TS_NEW_CLASS in one file $filename";
+	    }
+	    $class_name = $1;
+	    $baseclass_name = $2;
+	    $mode = 1;
+	}
+	elsif ( $line =~ m/^TS_NEW_CLASS_END/ ) {
+	    $mode = 0;
+	}
+	elsif ( $line =~ m/^TS_STATE\(([a-zA-Z0-9_]*)\)/ ) {
+	    my $state_name = $1;
+	    push(@new_states,$state_name);
+	}
+	elsif ( $line =~ m/^TS_PUBLIC\(([a-zA-Z0-9_]*)\)/ ) {
+	    my $state_name = $1;
+	    push(@new_states,"public_".$state_name);
+	}
+	elsif ( $mode == 1 && $line =~ m/typedef[ \t]+struct[ \t]+___ts_private/ ) {
+	    $mode = 2;
+	}
+        elsif ( $mode == 2 && $line =~ m/___TS_PRIVATE/ ) {
+            $mode = 1;
+        }
+        elsif ( $mode == 1 && $line =~ m/typedef[ \t]+struct[ \t]+___ts_public/ ) {
+            $mode = 3;
+        }
+        elsif ( $mode == 3 && $line =~ m/___TS_PUBLIC/ ) {
+            $mode = 1;
+        }
+        elsif ( $mode == 2 ) {
+        	push(@typedef_lines,$line);
+        }
+        elsif ( $mode == 3 ) {
+        	push(@typedef_public,$line);
+        }
+	else {
+	}
+    }
+    close(IN);
+    if ( !(defined $class_name) || $class_name eq "" ) {
+	return;
+    }
+
+    set_filename();
+    print STDERR "CLASS $class_name -- $baseclass_name >> $opened_file $closed_file\n";
+
+    output_cs_file($class_name,$baseclass_name,\@new_states);
+    output_op_file($class_name,$baseclass_name,\@new_states,\@typedef_lines);
+    output_pb_file($class_name,$baseclass_name,\@new_states,\@typedef_public);
+}
+
+
+sub make_trans_args
+{
+    my @args = @_;
+    my $mode = shift(@args);
+    my $ret = {
+	"in" => [],
+	"out" => []
+    };
+    foreach ( @args ) {
+	my $inp = $_;
+	if ( $inp eq "REMOVE" ) {
+	    $mode = "out";
+	    next;
+	}
+	if ( !(-e $inp) ) {
+	    next;
+	}
+	if ( $inp =~ m/\.list$/ ) {
+	    open(IN,"<$inp");
+	    my @aa = ();
+	    while(<IN>) {
+		my $line = $_;
+		$line =~ s/[\n\r]//g;
+		push(@aa,$line);
+	    }
+	    close(IN);
+	    my $rr = make_trans_args($mode,@aa);
+	    $mode = $rr->{mode};
+	    foreach ( @{$rr->{in}} ) {
+		my $line = $_;
+		push(@{$ret->{in}},$line);
+	    }
+	    foreach ( @{$rr->{out}} ) {
+		my $line = $_;
+		push(@{$ret->{out}},$line);
+	    }
+	}
+	else {
+	    push(@{$ret->{$mode}},$inp);
+	}
+    }
+    $ret->{mode} = $mode;
+    return $ret;
+}
+
+sub get_trans_table
+{
+    my $filename = $_[0];
+    my $t_hash = {"ok" => 1};
+    my $class;
+    my $c_hash = {};
+    open(IN,"nm $filename|");
+    while(<IN>) {
+	my $line = $_;
+	$line =~ s/[\n\r]//g;
+	if ( !($line =~ m/^[0-9 \t]/) ) {
+	    if ( $class ) {
+		$c_hash->{$class} = $t_hash;
+		$t_hash = {"ok" => 1};
+	    }
+	    $class = "";
+	}
+	elsif ( $opt_nm eq "ub" && $line =~ m/[ \t]+U[ \t]+_trans_([a-zA-Z0-9_]+)/ ) {
+	    my $trans = $1;
+	    $t_hash->{$trans} = 1;
+	}
+	elsif ( $opt_nm eq "ub" && $line =~ m/[ \t]+D[ \t]+_class_([a-zA-Z0-9_]+)/ ) {
+	    $class = $1;
+	}
+	elsif ( $opt_nm eq "nub" && $line =~ m/[ \t]+U[ \t]+trans_([a-zA-Z0-9_]+)/ ) {
+	    my $trans = $1;
+	    $t_hash->{$trans} = 1;
+	}
+	elsif ( $opt_nm eq "nub" && $line =~ m/[ \t]+D[ \t]+class_([a-zA-Z0-9_]+)/ ) {
+	    $class = $1;
+	}
+    }
+    close(IN);
+    if ( $class ) {
+	$c_hash->{$class} = $t_hash;
+    }
+    return $c_hash;
+}
+
+sub get_class_table
+{
+    my $filename = $_[0];
+    my $c_hash = {};
+    open(IN,"nm $filename|");
+    while(<IN>) {
+	my $line = $_;
+	$line =~ s/[\n\r]//g;
+	if ( $opt_nm eq "ub" && $line =~ m/[ \t]+D[ \t]+_class_([a-zA-Z0-9_]+)/ ) {
+	    my $class = $1;
+	    $c_hash->{$class} = 1;
+	}
+	elsif ( $opt_nm eq "nub" && $line =~ m/[ \t]+D[ \t]+class_([a-zA-Z0-9_]+)/ ) {
+	    my $class = $1;
+	    $c_hash->{$class} = 1;
+	}
+    }
+    close(IN);
+    return $c_hash;
+}
+
+sub get_trans_table_list
+{
+    my @args = @_;
+    my $ret = {};
+    foreach ( @args ) {
+	my $filename = $_;
+	my $ch = get_trans_table($filename);
+	foreach ( keys %$ch ) {
+	    my $class = $_;
+	    foreach ( keys %{$ch->{$class}} ) {
+		my $trans = $_;
+		$ret->{$class}->{$trans} = 1;
+	    }
+	}
+    }
+    return $ret;
+}
+
+sub get_remove_table
+{
+    my $filename = $_[0];
+    my $t_hash;
+    open(IN,"nm $filename|");
+    while(<IN>) {
+	my $line = $_;
+	$line =~ s/[\n\r]//g;
+	if ( $opt_nm eq "ub" && $line =~ m/[ \t]+(U|D)[ \t]+_trans_([a-zA-Z0-9_]+)/ ) {
+	    my $trans = $2;
+	    $t_hash->{$trans} = 1;
+	}
+	elsif ( $opt_nm eq "nub" && $line =~ m/[ \t]+(U|D)[ \t]+trans_([a-zA-Z0-9_]+)/ ) {
+	    my $trans = $2;
+	    $t_hash->{$trans} = 1;
+	}
+    }
+    close(IN);
+    return $t_hash;
+}
+
+sub get_remove_table_list
+{
+    my @args = @_;
+    my $ret = {};
+    foreach ( @args ) {
+	my $filename = $_;
+	my $rt = get_remove_table($filename);
+	foreach ( keys %$rt ) {
+	    my $trans = $_;
+	    $ret->{$trans} = 1;
+	}
+    }
+    return $ret;
+}
+
+sub get_trans_table_all
+{
+    my @args = @_;
+    my $ret;
+    my $tbl = get_trans_table_list(@args);
+    foreach ( keys %$tbl ) {
+	my $class = $_;
+	foreach ( keys %{$tbl->{$class}} ) {
+	    my $trans = $_;
+	    if ( $trans eq "ok" ) {
+		next;
+	    }
+	    $ret->{$trans} = 1;
+	}
+    }
+    return $ret;
+}
+
+sub get_trans_table_opt
+{
+    my @args = @_;
+    my $target = shift(@args);
+    my $ret;
+    my $target_tbl = get_class_table($target);
+    my $tbl = get_trans_table_list(@args);
+    foreach ( keys %$tbl ) {
+	my $class = $_;
+	if ( $target_tbl->{$class} != 1 ) {
+	    next;
+	}
+	foreach ( keys %{$tbl->{$class}} ) {
+	    my $trans = $_;
+	    if ( $trans eq "ok" ) {
+		next;
+	    }
+	    $ret->{$trans} = 1;
+	}
+    }
+    return $ret;
+}
+
+sub output_trans_table
+{
+    my $type = $_[0];
+    my @args = @ARGV;
+    shift(@args);
+    shift(@args);
+    my $trans;
+    my $args_list = make_trans_args("in",@args);
+
+    if ( $type eq "all" ) {
+	$trans = get_trans_table_all(@{$args_list->{in}});
+    }
+    else {
+	$trans = get_trans_table_opt(@{$args_list->{in}});
+    }
+    my $remove = get_remove_table_list(@{$args_list->{out}});
+    foreach ( %$remove ) {
+	my $tt = $_;
+	delete $trans->{$tt};
+    }
+
+
+    my $tmp = get_tmp($filename);
+    open(OUT,">$tmp");
+    print OUT '#include "ts2/c/tinyState.h"'."\n\n";
+    my $adjust = 1;
+    foreach ( keys %$trans ) {
+	my $name = $_;
+	if ( $name eq "ZOM" ) {
+	    $adjust --;
+	    next;
+	}
+	my $cat = substr($name,0,3);
+	print OUT "TS_TRANS trans_$name = {CC_$cat \"$name\"};\n";
+    }
+    print OUT "TS_TRANS trans_ZOM = {CC_ZOM \"ZOM\"};\n\n";
+    print OUT '/* '.((keys %$trans)+$adjust).' states and PUBs */'."\n\n";
+    close(OUT);
+
+    copy_tmp($tmp,$filename);
+}
+
+sub output_add
+{
+    my @args = @ARGV;
+    shift(@args);
+    my $args_list = make_trans_args("in",@args);
+    my @result = ();
+    foreach ( @{$args_list->{in}} ) {
+	my $file = $_;
+	if ( -e $file ) {
+	    push(@result,$file);
+	}
+    }
+    open(OUT,">$filename");
+    print OUT join("\n",@result)."\n";
+    close(OUT);
+}
+
+
+if ( $cmd eq "file" ) {
+    $filename = $ARGV[1];
+    scan_file();
+}
+elsif ( $cmd eq "tta" ) {
+    $filename = $ARGV[1];
+    output_trans_table("all");
+}
+elsif ( $cmd eq "ttopt" ) {
+    $filename = $ARGV[1];
+    output_trans_table("opt");
+}
+elsif ( $cmd eq "add" ) {
+    $filename = $ARGV[1];
+    output_add();
+}
+else {
+    die "invalid command $cmd\n";
+}
+exit(0);

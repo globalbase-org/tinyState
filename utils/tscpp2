@@ -1,0 +1,1479 @@
+#!/usr/bin/perl
+
+use FindBin;
+use strict vars;
+use strict subs;
+
+use DB_File;
+use Fcntl;
+use Carp;
+use FindBin;
+use Getopt::Long;
+use Data::Dumper;
+
+
+my $threadSafe = 0;
+
+my $opt_header = "";
+my $opt_baseheader = "";
+
+GetOptions(
+    'header=s' => \$opt_header,
+    'baseheader=s' => \$opt_baseheader,
+        );
+
+my $cmd = $ARGV[0];
+
+sub get_tmp
+{
+    my $filename = $_[0];
+    if ( $filename =~ m/(.*)\/([^\/]+)$/ ) {
+	my $dir = $1;
+	my $fn = $2;
+	return "$dir/.$fn";
+    }
+    else {
+	return ".".$filename;
+    }
+}
+
+sub copy_tmp
+{
+    my $from = $_[0];
+    my $to = $_[1];
+
+    if ( !(-e $to) ) {
+	system("mv $from $to");
+	return;
+    }
+
+    open(IN,"<$from");
+    my $from_data = "";
+    while(<IN>) {
+	$from_data .= $_;
+    }
+    close(IN);
+
+    open(IN,"<$to");
+    my $to_data = "";
+    while(<IN>) {
+	$to_data .= $_;
+    }
+    if ( $from_data eq $to_data ) {
+	system("rm $from");
+	return;
+    }
+    system("rm $to");
+    system("mv $from $to");
+}
+
+
+sub elem_text
+{
+    my $e = $_[0];
+    return ref($e) eq 'HASH' ? $e->{text} : $e;
+}
+
+sub get_filenames
+{
+    my $filename = $_[0];
+    my $trunc;
+    if ( $opt_header eq "" ) {
+	$filename =~ m/^(.*)\.c$/;
+	$trunc = $1;
+    }
+    else {
+	if ( $filename =~ m/\// ) {
+	    $filename =~ m/\/([^\/]*)(\.cpp|\.cp|\.cxx)$/;
+	    $trunc = $opt_baseheader."/".$opt_header."/c++/".$1;
+	}
+	else {
+	    $filename =~ m/^(.*)(\.cpp|\.cp|\.cxx)$/;
+	    $trunc = $opt_baseheader."/".$opt_header."/c++/".$1;
+	}
+	system("mkdir -p $opt_baseheader/$opt_header/c++");
+    }
+    return {
+	"opened" => $trunc."_.h",
+	"public" => $trunc."_pb.h"
+    }
+}
+
+
+sub output_opened
+{
+    my $filename = $_[0];
+    my $result = $_[1];
+    my $tmp = get_tmp($filename);
+
+    local(*OUT);
+
+    open(OUT,">$tmp");
+    print OUT '
+#ifndef ___'.$result->{classname}.'_op_cpp_H___
+#define ___'.$result->{classname}.'_op_cpp_H___
+
+#include <stdio.h>
+';
+
+    if ( $result->{baseclassname} ) {
+	print OUT 
+'#include "'.$opt_header.'/c++/'.$result->{baseclassname}.'_.h"
+';
+    }
+    print OUT
+'#include "'.$result->{this_header_prefix}.'/'.$result->{classname}.'.h"
+';
+
+    if ( $result->{baseclassname} ) {
+	print OUT
+'#ifdef TS_BASECLASS
+#undef TS_BASECLASS
+#endif
+#define TS_BASECLASS '.$result->{baseclassname}.'_
+
+';
+    }
+
+    print OUT 
+'
+#ifdef TS_THISCLASS
+#undef TS_THISCLASS
+#endif
+#define TS_THISCLASS '.$result->{classname}.'_
+
+';
+
+    foreach ( @{$result->{states}} ) {
+	my $ss = $_;
+	print OUT 
+'#ifndef '.$ss.'
+#define '.$ss.' ((TS_STATE_TYPE)this->get_'.$ss.'())
+#endif
+';
+    }
+
+
+    my $stateCount = $#{$result->{states}}+1;
+    my $tableSize = int($stateCount*1.5);
+    if ( ($tableSize % 2) == 0 ) {
+	$tableSize ++;
+    }
+    my $baseclassPtr;
+    if ( $result->{baseclassname} eq "" ) {
+	$baseclassPtr = "0";
+    }
+    else {
+	$baseclassPtr = "&".$result->{baseclassname}."_::classInfo";
+    }
+
+    my $argsNo = 0;
+    foreach ( @{$result->{functions}} ) {
+	my $ff = $_;
+	my $i;
+	my $fname = $ff->{fname};
+	if ( $ff->{type} eq "" ) {
+	    $fname =~ s/_$//;
+	}
+	if ( $result->{classname} ne $fname ) {
+	    next;
+	}
+	
+	print OUT
+'#ifdef TS_ARGS'.$argsNo.'
+#undef TS_ARGS'.$argsNo.'
+#endif
+#define TS_ARGS'.$argsNo.' '."\\\n";
+
+	for ( $i = 0 ; $i <= $#{$ff->{args}} ; $i ++ ) {
+	    my $aa = $ff->{args}->[$i];
+	    my $str = $aa->{str};
+	    $str =~ s/\=(.*)$//;
+	    print OUT "\t".$str;
+	    if ( $i < $#{$ff->{args}} ) {
+		print OUT ",\t\\\n";
+	    }
+	}
+	print OUT "\\\n\n";
+
+
+	print OUT
+'#ifdef TS_CPARGS'.$argsNo.'
+#undef TS_CPARGS'.$argsNo.'
+#endif
+#define TS_CPARGS'.$argsNo.' '."\\\n";
+
+	for ( $i = 0 ; $i <= $#{$ff->{args}} ; $i ++ ) {
+	    my $aa = $ff->{args}->[$i];
+	    my $str = $aa->{str};
+	    $str =~ s/\=(.*)$//;
+	    $str =~ s/[ \t]*$//;
+	    $str =~ m/.*?([A-Za-z0-9_]+)$/;
+	    my $v = $1;
+	    if ( $v eq "parent" ) {
+		next;
+	    }
+	    print OUT "\tthis->$v = $v;\t\\\n";
+
+	}
+	print OUT "\n";
+	$argsNo ++;
+    }
+
+    print OUT
+'#ifdef TS_IMPLEMENT
+#undef TS_IMPLEMENT
+#endif
+';
+    print OUT "#define TS_IMPLEMENT\t\\\n";
+    print OUT "\t\\\n";
+    print OUT "TS_REFER\t\\\n";
+    print OUT $result->{classname}."_::ts_refer = {\"".
+	$result->{classname}."\",0};\t\\\n";
+    print OUT "TS_REFER *\t\\\n";
+    print OUT $result->{classname}."::getRefer() {\t\\\n";
+    print OUT "\treturn &this->impl->ts_refer;\t\\\n";
+    print OUT "}\t\\\n";
+
+    print OUT "const char *\t\\\n";
+    print OUT $result->{classname}."_::className = \"".
+	$result->{classname}."\";\t\\\n";
+    print OUT "const char *\t\\\n";
+    print OUT $result->{classname}."::getClass() {\t\\\n";
+    print OUT "\treturn this->impl->className;\t\\\n";
+    print OUT "}\t\\\n";
+    print OUT "const char *\t\\\n";
+    print OUT $result->{classname}."::getClass(const char * cls) {\t\\\n";
+    print OUT "\tif ( ::strcmp(cls,this->impl->className) == 0 )\t\\\n";
+    print OUT "\t\treturn this->impl->className;\t\\\n";
+    if ( $result->{baseclassname} eq "" ) {
+	print OUT "\treturn 0;\t\\\n";
+    }
+    else {
+	print OUT "\treturn ".$result->{baseclassname}."::getClass(cls);\t\\\n";
+    }
+    print OUT "}\t\\\n";
+    print OUT "\t\\\n";
+    foreach ( @{$result->{states}} ) {
+	my $ss = $_;
+	my $cat;
+	my $thr = "";
+	if ( $result->{thrStates}->{$ss} ) {
+	    $cat = "THR_".substr($ss,0,3);
+	}
+	else {
+	    $cat = substr($ss,0,3);
+	}
+	print OUT "TS_TRANS ".$result->{classname}."_::trans_$ss = {\t\\\n";
+	print OUT "\tCC_$cat \"$ss\",\t\\\n";
+	print OUT "\t &".$result->{classname}."_::state_$ss\t\\\n";
+	print OUT "};\t\\\n";
+    }
+    print OUT "\\\n";
+    print OUT "\\\n";
+    foreach ( @{$result->{functions}} ) {
+	my $ff = $_;
+	my $i;
+	my $fname = $ff->{fname};
+	if ( $ff->{type} eq "" ) {
+	    $fname =~ s/_$//;
+	}
+	my $ttype = $ff->{type};
+	$ttype =~ s/^(static|virtual)[ \t]+//;
+	print OUT $ttype."\t\\\n";
+	print OUT $result->{classname}."::".$fname."(";
+	for ( $i = 0 ; $i <= $#{$ff->{args}} ; $i ++ ) {
+	    my $aa = $ff->{args}->[$i];
+	    my $str = $aa->{str};
+	    $str =~ s/\=(.*)$//;
+	    print OUT $str;
+	    if ( $i < $#{$ff->{args}} ) {
+		print OUT ",";
+	    }
+	}
+	print OUT ") ";
+	if ( $ff->{type} eq "" && !($fname =~ m/^\~/ ) ) {
+	    print OUT " :\t\\\n\t\t";
+	    if ( $result->{baseclassname} ne "" ) {
+		print OUT $result->{baseclassname}."(0,sPtr<tinyState_>::d_cast(thNEW(".$result->{classname}."_,(";
+	    }
+	    else {
+		print OUT "impl(thNEW(".$result->{classname}."_,(";
+	    }
+	    my $i;
+	    for ( $i = 0 ; $i <= $#{$ff->{args}} ; $i ++ ) {
+		my $aa = $ff->{args}->[$i];
+		print OUT $aa->{var};
+		if ( $i < $#{$ff->{args}} ) {
+		    print OUT ",";
+		}
+	    }
+	    if ( $result->{baseclassname} ne "" ) {
+		print OUT ")))),\t\\\n\t\timpl(sPtr<".$result->{classname}."_>::d_cast(tinyState::impl))";
+	    }
+	    else {
+		print OUT ")))";
+	    }
+	    foreach ( @{$result->{vars}} ) {
+		my $vv = $_;
+		print OUT ",\t\\\n\t\t".$vv->{fname}."(impl->".$result->{classname}."_::".$vv->{fname}.")";
+	    }
+	}
+	print OUT "\t\\\n{\t\\\n";
+
+	if ( $ff->{type} eq "" ) {
+	    if ( $ff->{fname} =~ m/^\~/ ) {
+		print OUT "\tif ( this->impl->className != this->getClass() ) return;\t\\\n";
+		print OUT "\tthis->impl = thNULL;\t\\\n";
+	    }
+	    else {
+		print OUT "\tthis->impl->ifp = thThis;\t\\\n";
+		print OUT "\tif ( this->impl->className != this->getClass() ) return;\t\\\n";
+		print OUT "\tthis->tinyState::inherit(parent);";
+#
+#		my $i;
+#		for ( $i = 0 ; $i <= $#{$ff->{args}} ; $i ++ ) {
+#		    my $aa = $ff->{args}->[$i];
+#		    print OUT $aa->{var};
+#		    if ( $i < $#{$ff->{args}} ) {
+#			print OUT ",";
+#		    }
+#		}
+#		print OUT ");\t\\\n";
+
+
+		if ( $result->{interface_output} ne "already"  ) {
+		    print OUT "}\t\\\n";
+		    print OUT $result->{classname}.
+			"::".$result->{classname}."(int dummy,sPtr<tinyState_> implptr) :\t\\\n\t\t";
+		    if ( $result->{baseclassname} ) {
+			print OUT $result->{baseclassname}."(dummy,implptr),\t\\\n\t\t";
+		    }
+		    print OUT "impl(sPtr<".$result->{classname}."_>::d_cast(implptr))";
+		    foreach ( @{$result->{vars}} ) {
+			my $vv = $_;
+			print OUT ",\t\\\n\t\t".$vv->{fname}."(impl->".$result->{classname}."_::".$vv->{fname}.")";
+		    }
+		    print OUT "\t\\\n{";
+		    if ( $result->{baseclassname} eq "" ) {
+			print OUT "\t\\\n";
+			print OUT "/*\timplptr->addref();*/\t\\\n";
+			print OUT "\tthis->impl->ifp = thThis;\t\\\n";
+		    }
+		    else {
+			print OUT "\t\\\n";
+			print OUT "\tthis->impl->ifp = thThis;\t\\\n";
+		    }
+		    $result->{interface_output} = "already";
+		}
+	    }
+	}
+	elsif ( $ff->{varg} eq "varg" ) {
+	    my $ret = "return ret;";
+	    my $rret = "ret = ";
+	    my $tt = $ff->{type};
+	    my $stf = 0;
+	    if ( $tt =~ s/^[ \t]*(virtual|static)[ \t]+(.*)$/$2/ ) {
+		if ( $1 eq "static" ) {
+		    $stf = 1;
+		}
+	    }
+	    if ( $ff->{type} eq "" || $tt eq "void" ) {
+		$ret = "";
+		$rret = "";
+	    }
+	    else {
+		print OUT "\t".$tt."\tret;\t\\\n";
+	    }
+	    print OUT "\tva_list arg;\t\\\n";
+
+# LOCK CODE
+	    if ( $threadSafe && !$stf ) {
+		print OUT "\t{\tsThreadMutexHandle __hdr(application->mtx);\\\n";
+	    }
+# LOCK CODE END
+
+	    print OUT "\tva_start(arg,".$ff->{args}->[$#{$ff->{args}}-1]->{var}
+	                    .");\t\\\n";
+	    if ( $ff->{type} =~ m/^static/ ) {
+		print OUT "\t$rret".$result->{classname}."_::v_".$ff->{fname}."(";
+	    }
+	    else {
+		print OUT "\t".$rret."this->impl->".$result->{classname}."_::v_".$ff->{fname}."(";
+	    }
+	    for ( $i = 0 ; $i <= $#{$ff->{args}} ; $i ++ ) {
+		my $aa = $ff->{args}->[$i];
+		if ( $i < $#{$ff->{args}} ) {
+		    print OUT $aa->{var};
+		    print OUT ",";
+		}
+		else {
+		    print OUT "arg";
+		}
+	    }
+	    print OUT ");\t\\\n";
+	    print OUT "\tva_end(arg);\t\\\n";
+# UNLOCK CODE
+	    if ( $threadSafe && !$stf ) {
+		print OUT "\t}\t\\\n";
+	    }
+# UNLOCK CODE END
+
+	    if ( $ret ne "" ) {
+		print OUT "\t$ret\t\\\n";
+	    }
+	}
+	else {
+# LOCK CODE
+	    my $rret;
+	    my $ret;
+	    my $tt = $ff->{type};
+	    my $stf = 0;
+	    if ( $tt =~ s/^[ \t]*(virtual|static)[ \t]+(.*)$/$2/ ) {
+		if ( $1 eq "static" ) {
+		    $stf = 1;
+		}
+	    }
+	    if ( $threadSafe && !$stf) {
+		$rret = "return ret;";
+		$ret = "ret = ";
+		if ( $ff->{type} eq "" || $tt eq "void" ) {
+		    $rret = "";
+		    $ret = "";
+		}
+		else {
+		    print OUT "\t".$tt."\tret;\t\\\n";
+		}
+		print OUT "\t{\tsThreadMutexHandle __hdr(application->mtx);\t\\\n";
+# LOCK CODE END
+	    } else {
+
+		$ret = "return";
+		if ( $ff->{type} eq "" || $tt eq "void" ) {
+		    $ret = "";
+		}
+
+	    }
+# REPLACE ORG
+	    if ( $ff->{type} =~ m/^static/ ) {
+		print OUT "\t$ret ".$result->{classname}."_::".$ff->{fname}."(";
+	    }
+	    else {
+		print OUT "\t$ret this->impl->".$result->{classname}."_::".$ff->{fname}."(";
+	    }
+	    for ( $i = 0 ; $i <= $#{$ff->{args}} ; $i ++ ) {
+		my $aa = $ff->{args}->[$i];
+		print OUT $aa->{var};
+		if ( $i < $#{$ff->{args}} ) {
+		    print OUT ",";
+		}
+	    }
+	    print OUT ");\t\\\n";
+# UNLOCK CODE
+	    if ( $threadSafe && !$stf) {
+		print OUT "\t}\\\n";
+		print OUT "\t$rret\t\\\n";
+	    }
+# UNLOCK CODE END
+
+	}
+	print OUT "}\t\\\n"
+    }
+    print OUT"\\\n";
+    print OUT"\\\n";
+
+    print OUT "class ".$result->{classname}.";\n";
+    if ( $result->{baseclassname} ) {
+	print OUT "class ".$result->{baseclassname}."_;\n";
+    }
+    print OUT "\n";
+
+    {
+	my ($last_lineno, $last_file) = (-1, "");
+	foreach my $elem ( @{$result->{implement}} ) {
+	    if ( ref($elem) eq 'HASH' ) {
+		my $lineno = $elem->{lineno};
+		my $file   = $elem->{file};
+		if ( $lineno != $last_lineno + 1 || $file ne $last_file ) {
+		    print OUT "#line $lineno \"$file\"\n";
+		}
+		print OUT $elem->{text}."\n";
+		$last_lineno = $lineno;
+		$last_file   = $file;
+	    } else {
+		print OUT $elem."\n";
+		$last_lineno = -1;
+		$last_file   = "";
+	    }
+	}
+    }
+
+    print OUT "\n\n";
+
+    print OUT '
+#endif // ___'.$result->{classname}.'_op_cpp_H___
+
+';
+    
+
+    close(OUT);
+
+    copy_tmp($tmp,$filename);
+}
+
+
+sub output_public
+{
+    my $filename = $_[0];
+    my $result = $_[1];
+    my $tmp = get_tmp($filename);
+
+    local(*OUT);
+
+    open(OUT,">$tmp");
+    print OUT '
+#ifndef ___'.$result->{classname}.'_pb_cpp_H___
+#define ___'.$result->{classname}.'_pb_cpp_H___
+
+';
+    if ( $result->{baseclassname} ) {
+	print OUT
+'#include "'.$result->{base_header_prefix}."/".$result->{baseclassname}.'.h"
+
+';
+    }
+    print OUT
+'#ifdef TS_INTERFACE
+#undef TS_INTERFACE
+#endif
+#define TS_INTERFACE '.$result->{classname}.'
+';
+    if ( $result->{baseclassname} ) {
+	print OUT
+'#ifdef TS_BASEINTERFACE
+#undef TS_BASEINTERFACE
+#endif
+#define TS_BASEINTERFACE '.$result->{baseclassname}.'
+';
+    }
+    else {
+	print OUT
+'#ifdef TS_BASEINTERFACE
+#undef TS_BASEINTERFACE
+#endif
+#define TS_BASEINTERFACE
+';
+    }
+
+
+    print OUT "class ".$result->{classname}."_;\n";
+    if ( $result->{baseclassname} ) {
+	print OUT "class ".$result->{baseclassname}.";\n";
+    }
+
+    print OUT "\n\n";
+
+    {
+	my ($last_lineno, $last_file) = (-1, "");
+	foreach my $elem ( @{$result->{interface}} ) {
+	    if ( ref($elem) eq 'HASH' ) {
+		my $lineno = $elem->{lineno};
+		my $file   = $elem->{file};
+		if ( $lineno != $last_lineno + 1 || $file ne $last_file ) {
+		    print OUT "#line $lineno \"$file\"\n";
+		}
+		print OUT $elem->{text}."\n";
+		$last_lineno = $lineno;
+		$last_file   = $file;
+	    } else {
+		print OUT $elem."\n";
+		$last_lineno = -1;
+		$last_file   = "";
+	    }
+	}
+    }
+
+    print OUT "\n\n";
+
+    print OUT '
+#endif // ___'.$result->{classname}.'_pb_cpp_H___
+
+';
+    
+    close(OUT);
+
+    copy_tmp($tmp,$filename);
+}
+
+sub scan_implement
+{
+    my $classname = $_[0];
+    my $argsptr = $_[1];
+    my @args = @$argsptr;
+    for ( ; $#args >= 0 ; ) {
+	my $line = elem_text(shift(@args));
+	$line =~ s/[\n\r]//g;
+	if ( $line =~ m/class[ \t]+$classname[ \t]*\:/ ) {
+	    last;
+	}
+	if ( $line =~ m/class[ \t]+TS_THISCLASS[ \t]*\:/ ) {
+	    last;
+	}
+    }
+    for ( ; $#args >= 0 ; ) {
+	my $line = elem_text(shift(@args));
+	$line =~ s/[\n\r]//g;
+	if ( $line =~ m/public:/ ) {
+	    last;
+	}
+    }
+    my $pdata = "";
+    my $in_pdata_block = 0;
+    for ( ; $#args >= 0 ; ) {
+	my $line = elem_text(shift(@args));
+	$line =~ s/[\n\r]//g;
+	if ( $line =~ m/^[ \t]*\/\// ) {
+	    next;
+	}
+	if ( $in_pdata_block ) {
+	    if ( $line =~ m|\*/| ) { $in_pdata_block = 0; }
+	    next;
+	}
+	# Strip same-line /* */ comments and // tail comments (fix Problem A)
+	$line =~ s|/\*.*?\*/||g;
+	$line =~ s|//.*$||;
+	# If a multi-line block comment starts, keep content before /* and track
+	if ( $line =~ m|/\*| ) {
+	    $line =~ s|/\*.*$||;
+	    $in_pdata_block = 1;
+	}
+	if ( $line =~ m/\:/ ) {
+	    last;
+	}
+	if ( $line =~ m/\}[ \t]*\;/ ) {
+	    last;
+	}
+	# Replace inline method bodies {} (only after closing )) with ; — preserves = {} defaults (fix Problem C)
+	1 while $line =~ s/\)[^\(\){}]*\{[^{}]*\}/);/g;
+	$pdata .= $line." ";
+    }
+    my @funcs = split(/\;/,$pdata);
+    my @func_list = ();
+    my @var_list = ();
+    foreach ( @funcs ) {
+	my $item = $_;
+	my $type = "";
+	my $fname = "";
+	my $args = "";
+	my $vf = 0;
+	$item =~ s/^[ \t]*//;
+	if ( $item =~ m/^[ \t]*IMP_PRIVATE/ ) {
+	    next;
+	}
+	if ( $item =~ m/^(\~[a-zA-Z0-9_]+)[ \t]*\((.*)\)/ ) {
+	    $type = "";
+	    $fname = $1;
+	    $args = $2;
+	}
+	elsif ( $item =~ m/^(.*[^a-zA-Z0-9_])([a-zA-Z0-9_]+)[ \t]*\((.*)\)/ ) {
+	    $type = $1;
+	    $fname = $2;
+	    $args = $3;
+	}
+	elsif ( $item =~ m/^([a-zA-Z0-9_]+)[ \t]*\((.*)\)/ ) {
+	    $type = "";
+	    $fname = $1;
+	    $args = $2;
+	}
+	elsif ( $item =~ m/^(.*[^a-zA-Z0-9_])([a-zA-Z0-9_]+)[ \t]*\[(.*)\]$/ ) {
+	    $type = $1."[".$3."]";
+	    $fname = $2;
+	    $args = "";
+	    $vf = 1;
+	}
+	elsif ( $item =~ m/^(.*[^a-zA-Z0-9_])([a-zA-Z0-9_]+)[ \t]*$/ ) {
+	    $type = $1;
+	    $fname = $2;
+	    $args = "";
+	    $vf = 1;
+	}
+	else {
+	    next;
+	}
+	if ( $fname eq "refDestroy" ) {
+	    next;
+	}
+	if ( $fname eq "ifp" ) {
+	    next;
+	}
+	my @argss = split(/,/,$args);
+	my $num = 1;
+	my @args_list = ();
+	my $varg = "";
+	foreach ( @argss ) {
+	    my $aa = $_;
+	    my $name;
+	    if ( $aa =~ m/([a-zA-Z0-9_]+)\s*\=(.*)$/ ) {
+		$name = $1;
+	    }
+	    elsif ( $aa =~ m/([a-zA-Z0-9_]+)$/ ) {
+		$name = $1;
+	    }
+	    elsif ( $aa =~ m/\.\.\./ ) {
+		$name = "";
+		$varg = "varg";
+	    }
+	    else {
+		$name = "__arg".$num;
+		$num ++;
+		$aa .= $name
+	    }
+	    $aa =~ s/^[ \t]+//;
+	    $aa =~ s/[ \t]+$//;
+	    push(@args_list,{
+		str => $aa,
+		var => $name});
+	}
+	$type =~ s/[ \t]+$//;
+	if ( $vf == 0 ) {
+	    push(@func_list,{
+		type => $type,
+		fname => $fname,
+		args => \@args_list,
+		varg => $varg
+		 });
+	}
+	else {
+	    push(@var_list,{
+		type => $type,
+		fname => $fname,
+		 });
+	}
+    }
+    return {
+	functions => \@func_list,
+	vars => \@var_list
+    };
+}
+
+sub scan_doc_comments
+{
+    my $lines = $_[0];
+    my $class_comment = [];
+    my %func_comments = ();
+    my @pending = ();
+    my $in_block = 0;
+    foreach my $elem (@$lines) {
+	my $line = elem_text($elem);
+	if ( !$in_block && $line =~ m|/\*\*| ) {
+	    @pending = ($line);
+	    $in_block = 1 unless $line =~ m|\*/|;
+	    next;
+	}
+	if ( $in_block ) {
+	    push(@pending, $line);
+	    if ( $line =~ m|\*/| ) { $in_block = 0; }
+	    next;
+	}
+	if ( $line =~ m|^\s*///| ) {
+	    push(@pending, $line);
+	    next;
+	}
+	if ( $line =~ m|^\s*$| ) { next; }
+	if ( $line =~ m!class[ \t]+(TS_THISCLASS|TS_INTERFACE|[A-Za-z0-9_]+)[ \t]*[:{]! ) {
+	    $class_comment = [@pending] if @pending;
+	    @pending = ();
+	    next;
+	}
+	if ( $line =~ m|IMP_PRIVATE| ) { @pending = (); next; }
+	if ( @pending && $line =~ m|([A-Za-z0-9_~]+)[ \t]*\(| ) {
+	    my $fname = $1;
+	    $fname =~ s/_$//;
+	    push @{$func_comments{$fname}}, [@pending] if $fname ne "";
+	    @pending = ();
+	    next;
+	}
+	if ( $line =~ m|\S| ) { @pending = (); }
+    }
+    return { class_comment => $class_comment, func_comments => \%func_comments };
+}
+
+sub insert_field
+{
+    my $classname = $_[0];
+    my $place = $_[1];
+    my $inserted = $_[2];
+    my $list = $_[3];
+    my $field = "public";
+    my $result = {
+	"public" => [],
+	"protected" => [],
+	"private" => []
+    };
+    my @result_pre = ();
+    my @result_post = ();
+    for ( ; ; ) {
+	if ( $#$list < 0 ) {
+	    @$list = @result_pre;
+	    return;
+	}
+	my $elem = shift(@$list);
+	my $line = elem_text($elem);
+	push(@result_pre,$elem);
+	if ( $line =~ m/class[ \t]+$classname[ \t]*\:/ ) {
+	    last;
+	}
+	if ( $line =~ m/class[ \t]+TS_THISCLASS[ \t]*\:/ ) {
+	    last;
+	}
+	if ( $line =~ m/class[ \t]+TS_INTERFACE[ \t]*\:/ ) {
+	    last;
+	}
+    }
+    # Track brace depth so inline method bodies with }; don't terminate the parse
+    my $depth = 1;  # class opening { is on the class definition line (in @result_pre)
+    for ( ; $#$list >= 0 ; ) {
+	my $elem = shift(@$list);
+	my $line = elem_text($elem);
+	my $opens  = () = $line =~ /\{/g;
+	my $closes = () = $line =~ /\}/g;
+	$depth += $opens - $closes;
+	if ( $depth <= 0 ) {
+	    push(@result_post,$elem);
+	    last;
+	}
+	if ( $depth == 1 ) {
+	    if ( $line =~ m/^\s*public\s*:/ ) {
+		$field = "public";
+		next;
+	    }
+	    elsif ( $line =~ m/^\s*protected\s*:/ ) {
+		$field = "protected";
+		next;
+	    }
+	    elsif ( $line =~ m/^\s*private\s*:/ ) {
+		$field = "private";
+		next;
+	    }
+	}
+	push(@{$result->{$field}},$elem);
+    }
+    push(@result_post,@$list);
+    if ( ref($inserted) eq 'ARRAY' ) {
+        foreach my $ins_line (@{$inserted}) {
+            push(@{$result->{$place}},$ins_line);
+        }
+    } else {
+        push(@{$result->{$place}},"\t".$inserted);
+    }
+    @$list = @result_pre;
+    if ( $#{$result->{private}} >= 0 ) {
+	push(@$list,"private:",@{$result->{private}});
+    }
+    if ( $#{$result->{protected}} >= 0 ) {
+	push(@$list,"protected:",@{$result->{protected}});
+    }
+    if ( $#{$result->{public}} >= 0 ) {
+	push(@$list,"public:",@{$result->{public}});
+    }
+    push(@$list,@result_post);
+}
+
+
+sub replace_macro
+{
+    my $classname = $_[0];
+    my $baseclassname = $_[1];
+    my $list = $_[2];
+    my $imp_classname = $classname."_";
+    my $imp_baseclassname = $baseclassname."_";
+    my @result;
+    foreach ( @$list ) {
+	my $elem = $_;
+	if ( ref($elem) eq 'HASH' ) {
+	    my %new_elem = %$elem;
+	    $new_elem{text} =~ s/TS_INTERFACE/$classname/g;
+	    $new_elem{text} =~ s/TS_BASEINTERFACE/$baseclassname/g;
+	    $new_elem{text} =~ s/TS_THISCLASS/$imp_classname/g;
+	    $new_elem{text} =~ s/TS_BASECLASS/$imp_baseclassname/g;
+	    push(@result,\%new_elem);
+	} else {
+	    my $line = $elem;
+	    $line =~ s/TS_INTERFACE/$classname/g;
+	    $line =~ s/TS_BASEINTERFACE/$baseclassname/g;
+	    $line =~ s/TS_THISCLASS/$imp_classname/g;
+	    $line =~ s/TS_BASECLASS/$imp_baseclassname/g;
+	    push(@result,$line);
+	}
+    }
+    return @result;
+}
+
+sub scan_file
+{
+    my $filename = $_[0];
+    my $filenames = get_filenames($filename);
+
+    my $classname = "";
+    my $baseclassname = "";
+    my @states = ();
+    my %thrStates = ();
+    my @private_var = ();
+    my %private_var_hash = ();
+    my @protected_var = ();
+    my @ref_var = ();
+    my @implement_include = ();
+    my @interface_include = ();
+    my $this_header_prefix = "ts2/c++";
+    my $base_header_prefix = "ts2/c++";
+    my %state_comments = ();
+    my $pending_state_comment = [];
+    my $in_state_doc_block = 0;
+    my $in_block_comment = 0;
+
+    open(IN,"<$filename");
+    while(<IN>) {
+	my $line = $_;
+	$line =~ s/[\n\r]//g;
+	# Blank out C string/char literals before any comment-delimiter detection,
+	# so that "/*", "*/" or "//" appearing INSIDE a literal (e.g. a token-set
+	# string like "...%/*-+...") is not mistaken for a real comment. Detection
+	# below uses $code; comment-body accumulation still uses the raw $line.
+	(my $code = $line) =~ s/"(?:\\.|[^"\\])*"//g;   # remove "..."
+	$code =~ s/'(?:\\.|[^'\\])*'//g;                  # remove '...'
+	# Skip lines inside /* */ block comments (fix Problem B)
+	if ( $in_block_comment ) {
+	    if ( $line =~ m|\*/| ) { $in_block_comment = 0; }
+	    next;
+	}
+	# Accumulate Doxygen /** */ comments outside TS_BEGIN_* blocks for state docs
+	if ( !$in_state_doc_block && $code =~ m|/\*\*| ) {
+	    $pending_state_comment = [$line];
+	    $in_state_doc_block = 1 unless $code =~ m|\*/|;
+	    next;
+	}
+	if ( $in_state_doc_block ) {
+	    push(@$pending_state_comment, $line);
+	    if ( $line =~ m|\*/| ) { $in_state_doc_block = 0; }
+	    next;
+	}
+	if ( $line =~ m|^\s*///| ) {
+	    push(@$pending_state_comment, $line);
+	    next;
+	}
+	# Skip // comment lines (fix Problem B)
+	if ( $code =~ m|^\s*//| ) {
+	    $pending_state_comment = [];
+	    next;
+	}
+	# Start tracking non-doc /* */ block comments (fix Problem B)
+	if ( $code =~ m|/\*| && $code !~ m|\*/| ) {
+	    $in_block_comment = 1;
+	    $pending_state_comment = [];
+	    next;
+	}
+	# Strip remaining inline /* */ for TS_STATE/TS_THREAD detection (fix Problem B)
+	(my $stripped = $code) =~ s|/\*.*?\*/||g;
+	if ( $stripped =~ m/CLASS_TINYSTATE\(([^\)\,]*),([^\)\,]*)\)/ ) {
+	    $pending_state_comment = [];
+	    $classname = $1;
+	    $baseclassname = $2;
+	    if ( $classname =~ m/^(.*)\/([^\/]+)$/ ) {
+		$this_header_prefix = $1;
+		$classname = $2;
+	    }
+	    if ( $baseclassname =~ m/^(.*)\/([^\/]+)$/ ) {
+		$base_header_prefix = $1;
+		$baseclassname = $2;
+	    }
+	}
+	elsif ( $line =~ m/TS_BEGIN_IMPLEMENT/ ) {
+	    $pending_state_comment = [];
+	    while(<IN>) {
+		my $line = $_;
+		my $lineno = $.;
+		$line =~ s/[\n\r]//g;
+		if ( $line =~ m/TS_END_IMPLEMENT/ ) {
+		    last;
+		}
+		elsif ( $line =~ m/\[\[\#\#REPEAT/ ) {
+		    my $repeat;
+		    while(<IN>) {
+			my $ll = $_;
+			$ll =~ s/[\n\r]//g;
+			if ( $ll =~ m/\#\#\]\]/ ) {
+			    last;
+			}
+			$repeat .= $ll."++CR++";
+		    }
+		    my $ii = 0;
+		    my @repList;
+		    for ( ; $repeat =~ s/\[\[([^\]\[]+)\]\]/++REP$ii++/ ; 
+			$ii ++ ) {
+			my $rep = $1;
+			my @rep = split(/,/,$rep);
+			$repList[$ii] = \@rep;
+		    }
+		    my $ii = 0;
+		    my $result = "";
+		    for ( ; ; $ii ++ ) {
+			my $pic = $repeat;
+			my $jj;
+			for ( $jj = 0 ; $jj <= $#repList; $jj ++ ) {
+			    my $repl = $repList[$jj]->[$ii];
+			    if ( !$repl ) {
+				last;
+			    }
+			    $pic =~ s/\+\+REP$jj\+\+/$repl/;
+			}
+			if ( $jj <= $#repList ) {
+			    last;
+			}
+			$result .= $pic;
+		    }
+		    $result =~ s/\+\+CR\+\+$//;
+		    my @rr = split(/\+\+CR\+\+/,$result);
+		    push(@implement_include,@rr);  # REPEAT 展開行は行番号なし
+		    next;
+		}
+		push(@implement_include,{text => $line, lineno => $lineno, file => $filename});
+	    }
+	}
+	elsif ( $line =~ m/TS_BEGIN_INTERFACE/ ) {
+	    $pending_state_comment = [];
+	    while(<IN>) {
+		my $line = $_;
+		my $lineno = $.;
+		$line =~ s/[\n\r]//g;
+		if ( $line =~ m/TS_END_INTERFACE/ ) {
+		    last;
+		}
+		push(@interface_include,{text => $line, lineno => $lineno, file => $filename});
+	    }
+	}
+	elsif ( $stripped =~ m/TS_STATE\(([^\)\,]*)\)/ ) {
+	    my $ss = $1;
+	    push(@states,$ss);
+	    $state_comments{$ss} = [@$pending_state_comment] if @$pending_state_comment;
+	    $pending_state_comment = [];
+	}
+	elsif ( $stripped =~ m/TS_THREAD\(([^\)\,]*)\)/ ) {
+	    my $ss = $1;
+	    push(@states,$ss);
+	    $thrStates{$ss} = 1;
+	    $state_comments{$ss} = [@$pending_state_comment] if @$pending_state_comment;
+	    $pending_state_comment = [];
+	}
+	elsif ( $line =~ m/TS_PRIVATE\((.*)/ ) {
+	    $pending_state_comment = [];
+	    my $ss = $1;
+	    $ss =~ s/\)[ \t]*$//;
+	    if ( !$private_var_hash{$ss} ) {
+		push(@private_var,$ss);
+		$private_var_hash{$ss} = 1;
+	    }
+	}
+	elsif ( $line =~ m/TS_PROTECTED\((.*)/ ) {
+	    $pending_state_comment = [];
+	    my $ss = $1;
+	    $ss =~ s/\)[ \t]*$//;
+	    push(@protected_var,$ss);
+	}
+	elsif ( $line =~ m/TS_REF\(([^\)\,]*)\)/ ) {
+	    $pending_state_comment = [];
+	    my $ss = $1;
+	    push(@ref_var,$ss);
+	}
+	elsif ( $line =~ m|\S| ) {
+	    $pending_state_comment = [];
+	}
+    }
+    if ( $classname eq "" ) {
+	return;
+    }
+    my $inc;
+    my $functions = scan_implement($classname."_",\@implement_include);
+    my $doc_info = scan_doc_comments(\@implement_include);
+
+    # Auto-detect class definition in interface block; append if absent
+    {
+	my $has_class_def = 0;
+	foreach my $iline (@interface_include) {
+	    if ( elem_text($iline) =~ m/class[ \t]+(${classname}|TS_INTERFACE)[ \t]*[:\{]/ ) {
+		$has_class_def = 1;
+		last;
+	    }
+	}
+	if ( !$has_class_def ) {
+	    if ( @{$doc_info->{class_comment}} ) {
+		push(@interface_include, @{$doc_info->{class_comment}});
+	    }
+	    if ( $baseclassname ) {
+		push(@interface_include,(
+		    "class ".$classname." : public ".$baseclassname." {",
+		    "};"
+		    ));
+	    }
+	    else {
+		push(@interface_include,(
+		    "class ".$classname." : public stdObject {",
+		    "};"
+		    ));
+	    }
+	}
+    }
+
+    # Compute constructor arg names for TS_DEFARGS expansion
+    my %argsName = ();
+    foreach my $ff (@{$functions->{functions}}) {
+	my $fn = $ff->{fname};
+	if ( $ff->{type} eq "" ) { $fn =~ s/_$//; }
+	next if $classname ne $fn;
+	foreach my $aa (@{$ff->{args}}) {
+	    my $str = $aa->{str};
+	    $str =~ s/\=(.*)$//;
+	    $str =~ s/[ \t]*$//;
+	    $str =~ m/.*?([A-Za-z0-9_]+)$/;
+	    my $v = $1;
+	    next if $v eq "parent";
+	    $argsName{$v} = $str;
+	}
+    }
+
+    # Replace TS_DEFARGS in implement block with actual member declarations
+    {
+	my @new_impl = ();
+	foreach my $elem (@implement_include) {
+	    if ( elem_text($elem) =~ m/^\s*TS_DEFARGS\s*$/ ) {
+		foreach my $v (keys %argsName) {
+		    push(@new_impl, "\t".$argsName{$v}.";");  # 自動生成行、行番号なし
+		}
+	    } else {
+		push(@new_impl, $elem);  # hashref のまま保存
+	    }
+	}
+	@implement_include = @new_impl;
+    }
+
+    # Build content arrays for direct injection into class bodies
+    my @if_public = ("\t".$classname."(int dummy,sPtr<tinyState_>);");
+    my %fname_idx = ();
+    foreach my $ff (@{$functions->{functions}}) {
+	my $fname = $ff->{fname};
+	if ( $ff->{type} eq "" ) { $fname =~ s/_$//; }
+	my $idx = $fname_idx{$fname} // 0;
+	$fname_idx{$fname} = $idx + 1;
+	if ( defined($doc_info->{func_comments}{$fname}) &&
+	     defined($doc_info->{func_comments}{$fname}[$idx]) ) {
+	    push(@if_public, @{$doc_info->{func_comments}{$fname}[$idx]});
+	}
+	my $decl = "\t".$ff->{type}." ".$fname."(";
+	for my $i (0..$#{$ff->{args}}) {
+	    $decl .= $ff->{args}[$i]{str};
+	    $decl .= "," if $i < $#{$ff->{args}};
+	}
+	$decl .= ");";
+	push(@if_public, $decl);
+    }
+    foreach my $vv (@{$functions->{vars}}) {
+	my $fname = $vv->{fname};
+	my $type = $vv->{type};
+	if ( $type =~ s/\[(.*)\]$// ) {
+	    my $num = $1;
+	    push(@if_public, "\t".$type."(& ".$fname.")[$num];");
+	} elsif ( $type =~ m/&[ \t]*$/ ) {
+	    push(@if_public, "\t".$type." ".$fname.";");
+	} else {
+	    push(@if_public, "\t".$type."& ".$fname.";");
+	}
+    }
+    push(@if_public, "\tvirtual TS_REFER * getRefer();");
+    push(@if_public, "\tvirtual const char * getClass();");
+    push(@if_public, "\tvirtual const char * getClass(const char *);");
+
+    my @if_protected = ("\tsPtr<".$classname."_> impl;");
+
+    my @private_ts = ();
+    foreach my $ss (@private_var) {
+	push(@private_ts, "\t".$ss.";");
+    }
+    foreach my $ss (@states) {
+	push(@private_ts, "\tinline TS_STATE_TYPE TS_FORCEINLINE _state_$ss(sPtr<stdEvent>);");
+    }
+
+    my @protected_ts = ();
+    foreach my $ss (@protected_var) {
+	push(@protected_ts, "\t".$ss.";");
+    }
+    foreach my $ss (@states) {
+	if ( defined($state_comments{$ss}) && @{$state_comments{$ss}} ) {
+	    foreach my $cline (@{$state_comments{$ss}}) {
+		push(@protected_ts, "\t".$cline);
+	    }
+	}
+	push(@protected_ts, "\tstatic TS_TRANS trans_$ss;");
+	push(@protected_ts, "\tvirtual inline TS_STATE_TYPE TS_FORCEINLINE get_$ss() {");
+	push(@protected_ts, "\t\treturn (TS_STATE_TYPE)&trans_$ss;");
+	push(@protected_ts, "\t};");
+    }
+    push(@protected_ts, "");
+    foreach my $ss (@states) {
+	push(@protected_ts, "\tstatic TS_STATE_TYPE state_$ss(sPtr<tinyState_>,sPtr<stdEvent>);");
+    }
+
+    my @public_ts = (
+	"\tstatic TS_REFER ts_refer;",
+	"\tvirtual TS_REFER * getRefer() {",
+	"\t\treturn &ts_refer;",
+	"\t}",
+	"\tstatic const char * className;",
+	"\tvirtual const char * getClass() {",
+	"\t\treturn className;",
+	"\t}",
+	"\tvirtual const char * getClass(const char * cls) {",
+	"\t\tif ( strcmp(cls,className) == 0 )",
+	"\t\t\treturn className;",
+	($baseclassname
+	    ? "\t\treturn this->".$baseclassname."_::getClass(cls);"
+	    : "\t\treturn 0;"),
+	"\t}",
+	"\tsWptr<".$classname."> ifp;",
+    );
+
+    insert_field($classname."_",
+		 "protected",\@protected_ts,\@implement_include);
+    insert_field($classname."_",
+		 "private",\@private_ts,\@implement_include);
+    insert_field($classname."_",
+		 "public",\@public_ts,\@implement_include);
+
+    insert_field($classname,
+		 "public",\@if_public,\@interface_include);
+    insert_field($classname,
+		 "protected",\@if_protected,\@interface_include);
+    @implement_include = replace_macro($classname,$baseclassname,
+				       \@implement_include);
+    @interface_include = replace_macro($classname,$baseclassname,
+				       \@interface_include);
+
+    my $result = {
+	"classname" => $classname,
+	"baseclassname" => $baseclassname,
+	"states" => \@states,
+	"thrStates" => \%thrStates,
+	"private_var" => \@private_var,
+	"protected_var" => \@protected_var,
+	"ref" => \@ref_var,
+	"functions" => $functions->{functions},
+	"vars" => $functions->{vars},
+	"implement" => \@implement_include,
+	"interface" => \@interface_include,
+	"this_header_prefix" => $this_header_prefix,
+	"base_header_prefix" => $base_header_prefix
+	    
+    };
+
+    output_opened($filenames->{opened},$result);
+    output_public($filenames->{public},$result);
+}
+
+#=================================================================
+
+my $ctemplate = '
+
++++PARENTINCLUDE+++#include	"+++GHEADER+++/+++CLASS+++_.h"
+
+CLASS_TINYSTATE(+++HEADER+++/+++CLASS+++,+++REPBASECLASS+++)
+
+
+#if 0
+
+TS_BEGIN_IMPLEMENT
+
+
+class TS_THISCLASS : public TS_BASECLASS {
+public:
+	+++CLASS+++_(
+		sPtr<+++PARENTCLASS+++> parent);
+	+++PARENTDECL+++
+private:
+protected:
+	TS_DEFARGS
+};
+
+TS_END_IMPLEMENT
+
+TS_BEGIN_INTERFACE
+#include	"ts2/c++/sRptr.h"
+class +++PARENTCLASS+++;
+TS_END_INTERFACE
+
+#endif
+
+
++++CLASS+++_::+++CLASS+++_(TS_ARGS0)
+        : +++NAMEBASECLASS+++_(parent)+++PARENTINITIALIZE+++
+{
+    TS_CPARGS0
+}
+
+
+
+/*******************************************
+	INSTANCE FUNCTIONS
+********************************************/
+
+
+
+/*******************************************
+	STATE MACHINE
+********************************************/
+
+
+
+';
+
+
+my $htemplate = '
+#ifndef ___+++CLASS+++_cpp_H___
+#define ___+++CLASS+++_cpp_H___
+
+#include	"+++GHEADER+++/+++CLASS+++_pb.h"
+
+#endif
+
+';
+
+sub new_template
+{
+    my $class = $_[0];
+    my $header_ofs = $_[1];
+    my $baseClass = $_[2];
+    my $parentClass = $_[3];
+    my $baseClassName;
+    my $parentClassPath = "ts2/c++";
+    my $parentGen = "";
+print STDERR "---- $parentClass\n";
+    if ( !$baseClass ) {
+	$baseClass = "ts2/c++/tinyState";
+	$baseClassName = "tinyState";
+    }
+    else {
+	$baseClass =~ m/\/([^\/]+)$/;
+	$baseClassName = $1;
+    }
+    if ( !$parentClass ) {
+	$parentClass = "tinyState";
+    }
+    elsif ( $parentClass eq "-" ) {
+	$parentClass = $baseClassName;
+	$baseClass =~ m/^(.*)\/([^\/]+)$/;
+	$parentClassPath = $1;
+	if ( $parentClass ne "tinyState" ) {
+	    $parentGen = "GEN";
+	}
+    }
+    else {
+	$parentClassPath = $parentClass;
+	$parentClass =~ m/^(.*)\/([^\/]+)$/;
+	$parentClass = $2;
+	$parentGen = "GEN";
+    }
+    my $path = $ENV{PWD};
+    my $rc = "";
+    $class = $path."/".$class;
+    if ( $class =~ s/^(.*)\/([^\/]+)$/$2/ ) {
+	$path = $1;
+    }
+    my $rc_path = $path;
+    print STDERR "NEW template $class -- $path\n";
+    for ( ; ; ) {
+	$rc = $rc_path."/.tscpp.rc";
+	if ( -e $rc ) {
+	    last;
+	}
+	if ( $rc_path =~ s/\/[^\/]+$// ) {
+	    next;
+	}
+	$rc = "";
+	last;
+    }
+    print STDERR "RC $rc $rc_path\n";
+    if ( $rc eq "" ) {
+	die "cannot found RC file .tscpp.rc";
+    }
+    my $rc_data = "";
+    open(IN,"<$rc") or die "cannot open $rc";
+    while(<IN>) {
+	my $inp = $_;
+	$rc_data .= $inp;
+    }
+    close(IN);
+    $rc_data = eval($rc_data);
+    my $hdr = $rc_data->{base};
+    my $ghdr = $rc_data->{generated};
+    my $data = $ctemplate;
+    my $parentInit = "";
+    my $parentInclude = "";
+    my $parentDecl = "";
+    if ( $parentGen ) {
+	$parentDecl = "\n\tsRptr<".$parentClass.",tinyState>\t\tparent;";
+	$parentInit = ",\n\t  parent(tinyState_::parent)";
+	$parentInclude = "#include\t\"".$parentClassPath.".h\"\n";
+    }
+    $data =~ s/\+\+\+CLASS\+\+\+/$class/g;
+    $data =~ s/\+\+\+HEADER\+\+\+/$header_ofs/g;
+    $data =~ s/\+\+\+GHEADER\+\+\+/$ghdr/g;
+    $data =~ s/\+\+\+REPBASECLASS\+\+\+/$baseClass/g;
+    $data =~ s/\+\+\+NAMEBASECLASS\+\+\+/$baseClassName/g;
+    $data =~ s/\+\+\+PARENTCLASS\+\+\+/$parentClass/g;
+    $data =~ s/\+\+\+PARENTDECL\+\+\+/$parentDecl/g;
+    $data =~ s/\+\+\+PARENTINITIALIZE\+\+\+/$parentInit/g;
+    $data =~ s/\+\+\+PARENTINCLUDE\+\+\+/$parentInclude/g;
+    open(OUT,">$path/$class.cpp") or die "cannot open $path/$class.cpp";
+    print OUT $data;
+    close(OUT);
+
+    my $data = $htemplate;
+    $data =~ s/\+\+\+CLASS\+\+\+/$class/g;
+    $data =~ s/\+\+\+HEADER\+\+\+/$hdr/g;
+    $data =~ s/\+\+\+GHEADER\+\+\+/$ghdr/g;
+    $data =~ s/\+\+\+REPBASECLASS\+\+\+/$baseClass/g;
+    $data =~ s/\+\+\+NAMEBASECLASS\+\+\+/$baseClassName/g;
+    $data =~ s/\+\+\+PARENTCLASS\+\+\+/$parentClass/g;
+    $data =~ s/\+\+\+PARENTINCLUDE\+\+\+/$parentInclude/g;
+    open(OUT,">$rc_path/$hdr/$header_ofs/$class.h")
+	or die "cannot open $rc_path/$hdr/$header_ofs/$class.h";
+    print OUT $data;
+    close(OUT);
+}
+
+#=================================================================
+
+if ( $cmd eq "file" ) {
+    scan_file($ARGV[1]);
+}
+elsif ( $cmd eq "new" ) {
+    new_template($ARGV[1],$ARGV[2],$ARGV[3],$ARGV[4]);
+}
+else {
+    print STDERR "invalid command $cmd\n";
+    print STDERR '
+tscpp.pl file <filename.cpp> [--header=<PATH1>][--baseheader=<PATH2>]
+
+  generating tinyState framework interface and implement header file
+
+  PATH1 path to directory of header files
+  PATH2 relative path from PATH1 to generated header files
+
+tscpp.pl new <PATH3/classname> <PATH4> [--header=<PATH1>][--baseheader=<PATH2>]
+tscpp.pl new <PATH3/classname> <PATH4> [<PATH5/baseclass> [<PATH6/PARENT>]] [--header=<PATH1>][--baseheader=<PATH2>]
+
+  generating template file of cpp and header file.
+  PATH3 directory of cpp file and classname
+  PATH4 headerfile directory
+  PATH5/baseclass base class name and its directory. default is ts2/c++/tinyState
+  PATH6/PARENT parent class name and its directory. default is ts2/c++/tinyState. if PARENT = '."'-'".' then same as base class.
+';
+}
+exit(0);

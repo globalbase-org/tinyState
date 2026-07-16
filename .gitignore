@@ -1,0 +1,15 @@
+.DS_Store
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+example/*/Makefile
+
+# build dirs (native + MinGW cross)
+build-mg*/
+build-mingw*/
+*.log
+
+# example build output (native + MinGW cross)
+example/*/build/
+example/*/build-mg/

@@ -1,0 +1,2572 @@
+#!/usr/bin/perl
+
+use strict vars;
+use strict subs;
+
+use DB_File;
+use Fcntl;
+use Carp;
+use FindBin;
+use Getopt::Long;
+use Data::Dumper;
+
+
+print STDERR "UTILS GTT\n";
+
+my $global_headerpost;
+my $global_headerdir;
+my $global_bodydir;
+
+my $base_dir = ".";
+my $dep_file;
+my @interface_path = ();
+my @include_search_path = ();
+
+GetOptions(
+    'base=s' => \$base_dir,
+    'dep=s' => \$dep_file,
+    'interface=s' => \@interface_path,
+    'include=s' => \@include_search_path
+    );
+
+print STDERR "INTERFACE PATH ".join(",",@interface_path)."\n";
+print STDERR "INCLUDE PATH ".join(",",@include_search_path)."\n";
+
+
+my %global_variable = ();
+
+
+my %global_typeSpace = ();
+
+my %loading_files = ();
+
+sub regulation_name
+{
+    my $inp = $_[0];
+    $inp =~ s/[ \t\n\r]+/ /g;
+    $inp =~ s/ ([\:,\.\;\[\]\<\>\*])/$1/g;
+    $inp =~ s/([\:,\.\;\[\]\[\]\<\>\*]) /$1/g;
+    $inp =~ s/^ //;
+    $inp =~ s/ $//;
+    return $inp;
+}
+
+sub copy_body
+{
+    my $inp = $_[0];
+    if ( (ref $inp) eq "HASH" ) {
+	my %ret = ();
+	foreach ( keys %$inp ) {
+	    my $key = $_;
+	    $ret{$key} = copy_body($$inp{$key});
+	}
+	return \%ret;
+    }
+    elsif ( (ref $inp) eq "ARRAY" ) {
+	my @ret = ();
+	foreach ( @$inp ) {
+	    my $dd = $_;
+	    push(@ret,copy_body($dd));
+	}
+	return \@ret;
+    }
+    else {
+	return $inp;
+    }
+}
+
+sub regulation
+{
+    my $inp = $_[0];
+    if ( (ref $inp) eq "HASH" ) {
+	my %ret = ();
+	foreach( keys %$inp ) {
+	    my $key = $_;
+	    my $reg = regulation_name($key);
+	    my $body = regulation($$inp{$key});
+	    if ( (($key) eq "inherit" || ($key eq "type")) && !(ref $body) ) {
+		$body = regulation_name($body);
+	    }
+	    for ( ; $reg =~ s/\<([^\>]+),([^\>]+)\>/<$1++++$2>/ ; ) {}
+	    for ( ; $reg =~ s/^([^\:]+)\:(.*),([^,]+)$/$1:$2/ ; ) {
+		my $aa = $1;
+		my $bb = $3;
+		$bb =~ s/\+\+\+\+/,/g;
+		my $res = $aa.":".$bb;
+		$ret{$res} = copy_body($body);
+	    }
+	    $reg =~ s/\+\+\+\+/,/g;
+	    $ret{$reg} = $body;
+	}
+	return \%ret;
+    }
+    elsif ( (ref $inp) eq "ARRAY" ) {
+	my @ret = ();
+	foreach ( @$inp ) {
+	    my $dd = $_;
+	    push(@ret,regulation($dd));
+	}
+	return \@ret;
+    }
+    else {
+	return $inp;
+    }
+}
+
+
+sub reg_path
+{
+    my $tp = $_[0];
+    $tp =~ s/\-/_/g;
+    $tp =~ s/\//_SS_/g;
+    return $tp;
+}
+
+sub reg_name
+{
+    my $inp = $_[0];
+    $inp =~ s/ /__/g;
+    $inp =~ s/\*/_XX_/g;
+    $inp =~ s/\[\]/_KK_/g;
+    $inp =~ s/\</_LT_/g;
+    $inp =~ s/\>/_GT_/g;
+    $inp =~ s/,/_PP_/g;
+    return $inp;
+}
+
+sub reg_name_list
+{
+    my $inp = $_[0];
+    foreach ( keys %$inp ) {
+	my $key = $_;
+	if( !($key =~ m/^type\:(.*)$/) ) {
+	    next;
+	}
+	my $org = $1;
+	my $body = $$inp{$key};
+	if ( (ref $body) ne "HASH" ) {
+	    next;
+	}
+	if ( !$body->{name} ) {
+	    $body->{name} = reg_name($org);
+	}
+	if ( !$body->{type} ) {
+	    $body->{type} = regulation_name($org);
+	}	    
+    }
+    return $inp;
+}
+
+sub reg_array
+{
+    my $inp = $_[0];
+    if ( (ref $inp) eq "HASH" ) {
+	my %ret = ();
+	foreach ( keys %$inp ) {
+	    my $kk = $_;
+	    $ret{$kk} = reg_array($inp->{$kk});
+	}
+	return \%ret;
+    }
+    if ( (ref $inp) eq "ARRAY" ) {
+	my $ret = "";
+	foreach( @$inp ) {
+	    my $line = $_;
+	    $ret .= $line."\n";
+	}
+	return $ret;
+    }
+    return $inp;
+}
+
+sub setup_global
+{
+    my $inp = $_[0];
+    $global_headerpost = $inp->{headerpost};
+    $global_headerdir = $base_dir."/".$inp->{headerdir};
+    $global_bodydir = $base_dir."/".$inp->{bodydir};
+    $global_variable{"headerpost"} = $global_headerpost;
+    $global_variable{"headerdir"} = $global_headerdir;
+    $global_variable{"bodydir"} = $global_bodydir;
+    unshift(@include_search_path,$global_headerdir);
+    foreach ( keys %$inp ) {
+	my $key = $_;
+	if ( !($key =~ m/^global\:(.*)$/) ) {
+	    next;
+	}
+	my $dd = $1;
+	$global_variable{$dd} = $inp->{$key};
+    }
+}
+
+sub get_header_filename
+{
+    my $inp = $_[0];
+    foreach ( @include_search_path ) {
+	my $path = $_;
+	my $filename = $path."/".$inp;
+	if ( -e $filename ) {
+	    return $filename;
+	}
+    }
+    return "";
+}
+
+my $getHeader_cache = {};
+
+
+sub get_header_filename_include
+{
+    my $inp = $_[0];
+    my @target = @include_search_path;
+    my $ghc = $getHeader_cache;
+    foreach ( @target ) {
+	my $path = $_;
+	my $filename = $path."/".$inp;
+	if ( -e $filename ) {
+	    return $inp;
+	}
+	my $dirok = "";
+	if ( $ghc->{$path} ) {
+	    $dirok = $ghc->{$path}->{$inp};
+	}
+	if ( !$dirok && -e $path ) {
+	    open(INH,"find $path -name '*.h' -print|");
+	    while(<INH>) {
+		my $dir = $_;
+		$dir =~ s/[\n\r]//g;
+		if ( !($dir =~ m@/([^/]+)$@) ) {
+		    next;
+		}
+		my $filename = $1;
+		$ghc->{$path}->{$filename} = $dir;
+		if ( $filename eq $inp ) {
+		    $dirok = $dir;
+		    last;
+		}
+	    }
+	}
+	if ( $dirok ) {
+	    return substr($dirok,length($path)+1);
+	}
+    }
+    return $global_headerpost."/".$inp;
+}
+
+
+
+sub get_load_filename
+{
+    my $inp = $_[0];
+    if ( -e $inp ) {
+	return $inp;
+    }
+    my $filename = $base_dir."/".$inp;
+    if ( -e $filename ) {
+	return $filename;
+    }
+    foreach ( @interface_path ) {
+	my $b = $_;
+	$filename = $b."/".$inp;
+
+	if ( -e $filename ) {
+	    return $filename;
+	}
+    }
+    print "cannot find the file $inp\n";
+    return "";
+}
+
+sub load_file 
+{
+    my $file = $_[0];
+    print  STDERR "INCLUDE $file\n";
+    if ( !open(IN,"<$file") ) {
+	die "cannot open the file $file\n";
+    }
+    $loading_files{$file} = 1;
+    my $code = "";
+    while(<IN>) {
+	my $line = $_;
+	$code .= $line;
+    }
+    close(IN);
+    my $data = eval($code);
+    if ( !$data ) {
+	die "parsing error !! $file\n";
+    }
+    $data = regulation($data);
+    if ( $data->{include} ) {
+	print STDERR "LOADING ".$data->{include}."...\n";
+	my @inc_ary = split(/,/,$data->{include});
+	foreach ( @inc_ary ) {
+	    my $ff = $_;
+	    my $inp = load_file(get_load_filename($ff));
+	    foreach ( keys %$inp ) {
+		my $key = $_;
+		if ( $data->{$key} ) {
+		    next;
+		}
+		$data->{$key} = $inp->{$key};
+	    }
+	}
+	delete $data->{include};
+    }
+    if ( $file =~ m@^$base_dir@ ) {
+	return $data;
+    }
+    foreach ( keys %$data ) {
+	my $key = $_;
+	if ( $key =~ m/^type\:/ ) {
+	    $data->{$key}->{"outputEnable"} = "off";
+	}
+    }
+    return $data;
+}
+
+sub load_file_top
+{
+    my $file = $_[0];
+print "B\n";
+    my $ret = load_file($file);
+    delete $loading_files{$file};
+    return $ret;
+}
+
+
+sub reg_template_length
+{
+    my $aa = $_[0];
+    $aa =~ s/\$\{([a-zA-Z0-9_]*)\}//g;
+    return length($aa);
+}
+
+sub reg_template
+{
+    my $inp = $_[0];
+    my @ary = ();
+    foreach ( keys %$inp ) {
+	my $kk = $_;
+	if ( !($kk =~ m/\$\{([a-zA-Z0-9_]*)\}/) ) {
+	    next;
+	}
+	push(@ary,$kk);
+    }
+    @ary = sort {reg_template_length($b) <=> reg_template_length($a) } @ary;
+    my @template_ary = ();
+    foreach ( @ary ) {
+	my $aa = $_;
+	my $dd = $inp->{$aa};
+	$aa =~ s/^type\://;
+	my $bb = $aa;
+	$aa =~ s/\[/\\[/g;
+	$aa =~ s/\]/\\]/g;
+	$aa =~ s/\</\\</g;
+	$aa =~ s/\>/\\>/g;
+	$aa =~ s/\*/\\*/g;
+	$aa =~ s/\$\{[a-zA-Z0-9_]+\}/(.*)/g;
+	$dd->{templateExpression} = $aa;
+	$dd->{templateOrg} = $bb;
+	my @sp = split(/^$aa$/,$bb);
+	$dd->{templateArgs} = \@sp;
+	push(@template_ary,$dd);
+    }
+    foreach ( @ary ) {
+	my $kk = $_;
+	delete $inp->{$kk};
+    }
+    $inp->{'__templates'} = \@template_ary;
+}
+
+
+sub get_type_info
+{
+    my $inp = $_[0];
+    my $type = $_[1];
+    my $result = $inp->{"type:".$type};
+
+    if ( $result ) {
+	return $result;
+    }
+    foreach ( @{$inp->{'__templates'}} ) {
+	my $tmp = $_;
+	my $exp = $tmp->{templateExpression};
+	if ( !($type =~ m/^$exp$/) ) {
+	    next;
+	}
+	my $args = $tmp->{templateArgs};
+	my $result = copy_body($tmp);
+	my @sp = split(/^$exp$/,$type);
+	my $i = 1;
+	for ( ; $i <= $#$args ; $i ++ ) {
+	    my $arg = $args->[$i];
+	    $arg =~ s/^\$\{//;
+	    $arg =~ s/\}$//;
+	    $result->{"argument:".$arg} = $sp[$i];
+	}
+	$result->{type} = $type;
+	$result->{name} = reg_name($type);
+	$inp->{"type:".$type} = $result;
+	if ( $result->{refer} ) {
+	    get_type_info($inp,replace_arg($result->{refer},$result));
+	}
+	delete $result->{outputEnable};
+       	return $result;
+    }
+    print STDERR "--- ".Dumper($inp);
+    die "not match the type $type\n";
+
+}
+
+
+
+sub save_dep_file
+{
+    my $dep = $_[0];
+    if ( !open(OUT,">$dep") ) {
+	return;
+    }
+    foreach ( keys %loading_files ) {
+	my $file = $_;
+	print OUT "$file ";
+    }
+    close(OUT);
+}
+
+sub read_define_single
+{
+    my $result = $_[0];
+    my $name = $_[1];
+    my %ret = ();
+    for ( ; $result =~ s/^(.*?)\;// ; ) {
+	my $line = regulation_name($1);
+	my ($type,$ptr,$var,$ary1);
+	my @ary = ();
+	if ( $line =~ m/^typedef ([a-zA-Z0-9_]+)(\<[^\>]+\>|)(\*+)$name(\[[^\]]+\])*/ ) {
+	    $type = $1.$2;
+	    $ptr = $3;
+	    $ary1 = $4;
+	}
+	elsif ( $line =~ m/^typedef ([a-zA-Z0-9_]+)(\<[^\>]+\>| )$name(\[[^\]]+\])*/ ) {
+	    $type = $1.$2;
+	    $ptr = "";
+	    $ary1 = $3;
+	}
+	else {
+	    next;
+	}
+	my $alist = "";
+	if ( $#ary < 0 ) {
+	    for ( ; $ary1 =~ s/\[([^\]]+)\]// ; ) {
+		my $sizeLength = $1;
+		push(@ary,$sizeLength);
+		$alist .= "[]";
+	    }
+	}
+	$ret{type} = {
+	    inherit => regulation_name($type.$ptr.$alist),
+	};
+	if ( $#ary >= 0 ) {
+	    $ret{type}->{ary} = \@ary;
+	}
+	return \%ret;
+    }
+    return \%ret;
+}
+
+sub read_define
+{
+    my $inp = $_[0];
+    my $name = $_[1];
+    my $headerdir = $_[2];
+    my $fpath = get_header_filename($inp);
+    if ( !$fpath || !open(IN,"<$fpath") ) {
+	if ( !open(IN,"<$fpath") ) {
+	    die "cannot open the file $inp\n";
+	}
+	else {
+	    $loading_files{$inp} = 1;
+	}
+    }
+    else {
+	$loading_files{$fpath} = 1;
+    }
+
+    my $data = "";
+    while(<IN>) {
+	my $line = $_;
+	$line =~ s/[\r\n]+//g;
+	$line =~ s/\/\/(.*)$//;
+	if ( $line =~ m/^[ \t]*\#/ ) {
+	    next;
+	}
+	$data .= $line;
+    }
+    close(IN);
+    my %ret = ();
+
+    $data =~ s/\/\*(.*?)\*\///g;
+    if ( !($data =~ m/typedef[ \t]+struct[ \t]+[a-zA-Z0-9_]+[ \t]*\{([^\}]*)\}[ \t]*$name[ \t]*\;/) ) {
+	my $ret = read_define_single($data,$name);
+	if ( !$ret->{type} ) {
+	    die "undefined type $name in the file $inp ($data)\n";
+	}
+        return $ret;
+    }
+    my $result = $1;
+    for ( ; $result =~ s/^(.*?)\;// ; ) {
+	my $line = regulation_name($1);
+	my ($type,$ptr,$var,$ary1);
+	my @ary = ();
+	if ( $line =~ m/^unsigned ([a-zA-Z0-9_]+)\:([0-9]+)/ ) {
+	    $type = "unsigned";
+	    $ptr = "";
+	    $var = $1;
+	    $ary1 = "";
+	}
+	elsif ( $line =~ m/^struct ([a-zA-Z0-9_]+)(\*+)([a-zA-Z0-9_]+)(\[[^\]]+\])*/ ) {
+	    $type = "struct ".$1;
+	    $ptr = $2;
+	    $var = $3;
+	    $ary1 = $4;
+	}
+	elsif ( $line =~ m/^struct ([a-zA-Z0-9_]+) ([a-zA-Z0-9_]+)(\[[^\]]+\])*/ ) {
+	    $type = "struct ".$1;
+	    $ptr = "";
+	    $var = $2;
+	    $ary1 = $3;
+	}
+	elsif ( $line =~ m/^([a-zA-Z0-9_]+)(\<[^\>]+\>|)(\*+)([a-zA-Z0-9_]+)(\[[^\]]+\])*/ ) {
+	    $type = $1.$2;
+	    $ptr = $3;
+	    $var = $4;
+	    $ary1 = $5;
+	}
+	elsif ( $line =~ m/^([a-zA-Z0-9_]+)(\<[^\>]+\>| )([a-zA-Z0-9_]+)(\[[^\]]+\])*/ ) {
+	    $type = $1.$2;
+	    $ptr = "";
+	    $var = $3;
+	    $ary1 = $4;
+	}
+	else {
+	    next;
+	}
+	my $alist = "";
+	if ( $#ary < 0 ) {
+	    for ( ; $ary1 =~ s/\[([^\]]+)\]// ; ) {
+		my $sizeLength = $1;
+		push(@ary,$sizeLength);
+		$alist .= "[]";
+	    }
+	}
+	$ret{"member:".$var} = {
+	    type => regulation_name($type.$ptr.$alist),
+	};
+	if ( $#ary >= 0 ) {
+	    $ret{"member:".$var}->{ary} = \@ary;
+	}
+    }
+    return \%ret;
+}
+
+sub reg_define
+{
+    my $inp = $_[0];
+    foreach ( keys %$inp ) {
+	my $key = $_;
+	my $body = $$inp{$key};
+	if ( !($key =~ m/type\:(.*)/) ) {
+	    next;
+	}
+	if ( (ref $body) ne "HASH" ) {
+	    next;
+	}
+	if ( !$body->{define} ) {
+	    next;
+	}
+	my $defineList = read_define($body->{define},$body->{name},$inp->{headerdir});
+	if ( $defineList->{type} ) {
+	    my $dd = $defineList->{type};
+	    if ( $#{$dd->{ary}} >= 0 ) {
+		$body->{ary} = $dd->{ary};
+	    }
+	    inherit_key($body,$dd,"inherit");
+	}
+	else {
+	    foreach ( keys %$defineList ) {
+		my $rkey = $_;
+		my $dd = $defineList->{$rkey};
+		if ( $body->{$rkey} ) {
+		    $body->{$rkey}->{type} = $dd->{type};
+		    if ( $#{$dd->{ary}} >= 0 ) {
+			$body->{$rkey}->{ary} = $dd->{ary};
+		    }
+		    inherit_key($body,$dd,"inherit");
+		    next;
+		}
+		$body->{$rkey} = $defineList->{$rkey};
+	    }
+	}
+    }
+    return $inp;
+}
+
+
+sub inherit_argument
+{
+    my $inbody = $_[0];
+    my $typeBody = $_[1];
+    foreach ( keys %$typeBody ) {
+	my $kk = $_;
+	if ( !($kk =~ m/^argument\:/) ) {
+	    next;
+	}
+	if ( $inbody->{$kk} ) {
+	    next;
+	}
+	$inbody->{$kk} = copy_body($typeBody->{$kk});
+    }
+}
+
+sub inherit_key
+{
+    my $inbody = $_[0];
+    my $typeBody = $_[1];
+    my $key = $_[2];
+    if ( $inbody->{$key} ) {
+	return;
+    }
+    if ( !$typeBody->{$key} ) {
+	return;
+    }
+    $inbody->{$key} = copy_body($typeBody->{$key});
+}
+
+sub inherit_key_all
+{
+    my $inbody = $_[0];
+    my $typeBody = $_[1];
+    foreach ( keys %$typeBody ) {
+	my $kk = $_;
+	if ( $kk eq "outputEnable" ) {
+	    next;
+	}
+	if ( $inbody->{$kk} ) {
+	    next;
+	}
+	$inbody->{$kk} = copy_body($typeBody->{$kk});
+    }
+}
+
+sub inherit_other_key
+{
+    my $body = $_[0];
+    my $to = $_[1];
+    my $from = $_[2];
+    if ( $body->{$to} ) {
+	return;
+    }
+    if ( !$body->{$from} ) {
+	return;
+    }
+    $body->{$to} = $body->{$from};
+}
+
+
+sub reg_member_handle
+{
+    my $inp = $_[0];
+    my $key = $_[1];
+    my $body = $_[2];
+    if ( $body->{handle} eq "complete" ) {
+	return;
+    }
+    elsif ( $body->{handle} eq "deal" ) {
+	die "loop reference $key\n";
+    }
+    $body->{handle} = "deal";
+    if ( $body->{inherit} ) {
+	my $type = regulation_name($body->{inherit});
+	my $typeBody;
+	$typeBody = get_type_info($inp,$type);
+	if ( !$typeBody ) {
+	    die "undefined type(1) $type\n";
+	}
+	reg_member_handle($inp,"type:".$type,$typeBody);
+	inherit_key_all($body,$typeBody);
+    }
+    foreach ( keys %$body ) {
+	my $inkey = $_;
+	if ( !($inkey =~ m/^member\:/) ) {
+	    next;
+	}
+	my $inbody = $body->{$inkey};
+	my $type = $inbody->{type};
+	if ( !$type ) {
+	    next;
+	}
+	$body->{activeMember} ++;
+	my $typeBody;
+	$typeBody = get_type_info($inp,$type);
+	if ( !$typeBody ) {
+	    die "undefined type(2) $type\n";
+	}
+	reg_member_handle($inp,"type:".$type,$typeBody);
+	inherit_key($inbody,$typeBody,"initial");
+	inherit_key($inbody,$typeBody,"updated");
+	inherit_key($inbody,$typeBody,"ary");
+	inherit_key($inbody,$typeBody,"compare");
+	inherit_key($inbody,$typeBody,"copy");
+	inherit_key($inbody,$typeBody,"encode");
+	inherit_key($inbody,$typeBody,"decode");
+	inherit_key($inbody,$typeBody,"import");
+	inherit_key($inbody,$typeBody,"export");
+	inherit_key($inbody,$typeBody,"destroy");
+	inherit_key($inbody,$typeBody,"include");
+	inherit_key($inbody,$typeBody,"dynamicPath");
+	inherit_key($inbody,$typeBody,"typeSpace");
+	inherit_argument($inbody,$typeBody);
+    }
+    $body->{handle} = "complete";
+}
+
+sub reg_member
+{
+    my $inp = $_[0];
+    foreach ( keys %$inp ) {
+	my $key = $_;
+	if ( !($key =~ m/^type\:/) ) {
+	    next;
+	}
+	my $body = $inp->{$key};
+	reg_member_handle($inp,$key,$body);
+    }
+    return $inp;
+}
+
+sub dec_var_ptr_org
+{
+    my $name = $_[0];
+    my $body = $_[1];
+    my $type = $body->{type};
+    my $ret;
+    if ( $type =~ s/[\[\]]+//g ) {
+	$ret = $type."(*".$name.")";
+    }
+    else {
+	$ret = $type."*".$name;
+    }
+    $type = $body->{type};
+    $type =~ s/^(.*)(\[(.*))$/$2/;
+    my $i = 0;
+    for ( ; $type =~ s/\[\]// ; ) {
+	$ret .= "[".$body->{ary}->[$i]."]";
+    }
+    for ( ; $type =~ s/\[\]// ; ) {
+	$ret .= "[]";
+    }
+    return $ret;
+}
+
+sub dec_var_org
+{
+    my $name = $_[0];
+    my $body = $_[1];
+    my $ret = $body->{type};
+    $ret =~ s/[\[\]]+//g;
+    $ret .= " ".$name;
+    my $type = $body->{type};
+    $type =~ s/^(.*)(\[(.*))$/$2/;
+    my $i = 0;
+    for ( ; $type =~ s/\[\]// ; ) {
+	$ret .= "[".$body->{ary}->[$i]."]";
+    }
+    for ( ; $type =~ s/\[\]// ; ) {
+	$ret .= "[]";
+    }
+    return $ret;
+}
+
+sub dec_var
+{
+    my $name = $_[0];
+    my $body = $_[1];
+    my $ret = $body->{type};
+    return reg_name($ret)."_type ".$name;
+}
+
+sub dec_var_ptr
+{
+    my $name = $_[0];
+    my $body = $_[1];
+    my $ret = $body->{type};
+    return reg_name($ret)."_type*".$name;
+}
+
+
+sub replace_arg_loop
+{
+    my $inp = $_[0];
+    my $body = $_[1];
+
+    foreach ( keys %$body ) {
+	my $arg = $_;
+	if ( !($arg =~ m/^argument\:(.*)/) ) {
+	    next;
+	}
+	my $var = $1;
+	my $value = $body->{$arg};
+	my $value2 = reg_name($value);
+	$inp =~ s/\$$var/$value/g;
+	$inp =~ s/\$\%$var/$value2/g;
+    }
+
+    if ( $body->{body} ) {
+	$inp = replace_arg_loop($inp,$body->{body});
+    }
+    return $inp;
+}
+
+sub replace_global
+{
+    my $inp = $_[0];
+    foreach ( keys %global_variable ) {
+	my $kk = $_;
+	my $dd = $global_variable{$kk};
+	$inp =~ s/\$\{$kk\}/$dd/g;
+	$inp =~ s/\$$kk/$dd/g;
+    }
+    return $inp;
+}
+
+sub replace_arg
+{
+    my $inp = $_[0];
+    my $body = $_[1];
+    $inp = replace_arg_loop($inp,$body);
+    $inp = replace_global($inp);
+    $inp =~ s/\$bodydir/$global_bodydir/g;
+    $inp =~ s/\$headerdir/$global_headerdir/g;
+    $inp =~ s/\$headerpost/$global_headerpost/g;
+    return $inp;
+}
+
+sub replace_member
+{
+    my $inp = $_[0];
+    my $mb = $_[1];
+    my $body = $_[2];
+    my $only_src = $_[3];
+    if ( !$mb ) {
+	$inp =~ s/\$dest/(*dest)/g;
+	$inp =~ s/\$src/(*src)/g;
+	my $val = $body->{type};
+	$val =~ s/\*$//;
+	$inp =~ s/\$gttType/$val/g;
+	my $i = 1;
+	my $ary = $body->{ary};
+	foreach ( @$ary ) {
+	    my $ss = $_;
+	    $inp =~ s/\$size$i/$ss/g;
+	}
+	$inp = replace_arg($inp,$body);
+	return $inp;
+    }
+    if ( (ref $inp) eq "ARRAY" ) {
+	$inp = join("\n",@$inp);
+    }
+    if ( $only_src == 1 ) {
+	$inp =~ s/\$src/src->$mb/g;
+	$inp =~ s/\$dest/dest/g;
+    }
+    elsif ( $only_src == 2 ) {
+	$inp =~ s/\$src/src/g;
+	$inp =~ s/\$dest/dest->$mb/g;
+    }
+    else {
+	$inp =~ s/\$src/src->$mb/g;
+	$inp =~ s/\$dest/dest->$mb/g;
+    }
+    my $val = $body->{type};
+    $val =~ s/\*$//;
+    $inp =~ s/\$gttType/$val/g;
+    $val = get_property2($mb,$body->{property});
+    $inp =~ s/\$property/$val/g;
+    my $i = 1;
+    my $ary = $body->{ary};
+    foreach ( @$ary ) {
+	my $ss = $_;
+	$inp =~ s/\$size$i/$ss/g;
+    }
+    $inp = replace_arg($inp,$body);
+    return $inp;
+}
+
+sub replace_simple
+{
+    my $inp = $_[0];
+    my $src = $_[1];
+    my $dest = $_[2];
+    my $body = $_[3];
+    $inp =~ s/\$src/$src/g;
+    $inp =~ s/\$dest/$dest/g;
+    if ( $body ) {
+	$inp = replace_arg($inp,$body);
+    }
+    return $inp;
+}
+
+sub gen_copy
+{
+    my $body = $_[0];
+    my $path = $_[1];
+    my $member = $_[2];
+    if ( $body->{activeMember} ) {
+	my @ret = ();
+	my $mflag = 0;
+	foreach ( keys %$body ) {
+	    my $key = $_;
+	    if ( $body->{$key} eq "IGNORE" ) {
+		next;
+	    }
+	    if ( !($key =~ m/^member\:(.*)$/) ) {
+		next;
+	    }
+	    my $mm = $1;
+	    if ( ($path eq "") && ($body->{$key}->{path}) || 
+		 ($path ne "") && ($path ne $body->{$key}->{path}) ) {
+		next;
+	    }
+	    push(@ret,gen_copy($body->{$key},$path,$mm));
+	}
+	return join("",sort @ret);
+    }
+    elsif ( $body->{copy} ) {
+	if ( $body->{copy} =~ m/\;$/ ) {
+	    return "   ".replace_member($body->{copy},$member,$body)."\n";
+	}
+	return "   ".replace_member($body->{copy},$member,$body).";\n";
+	
+    }
+    else {
+	return replace_member('   gtt_'.reg_name($body->{type}).'::copy(base,&$dest,&$src);'."\n",$member,$body);
+    }
+}
+
+sub gen_compare
+{
+    my $body = $_[0];
+    my $path = $_[1];
+    my $member = $_[2];
+    if ( $body->{activeMember} ) {
+	my @ret = ();
+	foreach ( keys %$body ) {
+	    my $key = $_;
+	    if ( !($key =~ m/^member\:(.*)$/) ) {
+		next;
+	    }
+	    my $mm = $1;
+	    if ( $body->{$key} eq "IGNORE" ) {
+		next;
+	    }
+	    if ( ($path eq "") && ($body->{$key}->{path}) || 
+		 ($path ne "") && ($path ne $body->{$key}->{path}) ) {
+		next;
+	    }
+	    push(@ret,gen_compare($body->{$key},$path,$mm));
+	}
+	return join("",sort @ret);
+    }
+    elsif ( $body->{compare} ) {
+	my $cc = $body->{compare};
+	if ( $cc =~ m/^\>\>/ ) {
+	    $cc = substr($cc,2);
+	    return "    ".replace_member($cc,$member,$body)."\n".
+		'   if ( result == 0 ) return 0;'."\n";
+	}
+	else {
+	    return "   if ( !(".replace_member($cc,$member,$body).") ) return 0;\n";
+	}
+    }
+    else {
+	return replace_member('   if ( gtt_'.reg_name($body->{type}).'::compare(base,&$src,&$dest) == 0 ) return 0;'."\n",$member,$body);
+    }
+}
+
+sub get_property
+{
+    my $name = $_[0];
+    my $body = $_[1];
+    my $pr = $body->{property};
+    if ( $pr ) {
+	if ( $pr =~ m/\// ) {
+	    $pr =~ s/\//','/g;
+	    return "['".$pr."']";
+	}
+	return $body->{property};
+    }
+    $name =~ s/\_/-/g;
+    return $name;
+}
+
+sub get_property2
+{
+    my $name = $_[0];
+    my $body = $_[1];
+    my $pr = $body->{property};
+    if ( $pr ) {
+	return $body->{property};
+    }
+    $name =~ s/\_/-/g;
+    return $name;
+}
+
+sub get_path
+{
+    my $name = $_[0];
+    my $body = $_[1];
+    my $pr = $body->{path};
+    if ( $pr ) {
+	return $body->{path};
+    }
+    $name =~ s/\_/-/g;
+    return $name;
+}
+
+
+sub quote_escape
+{
+    my $inp = $_[0];
+    $inp =~ s/\"/\\"/g;
+    return $inp;
+}
+
+sub get_value
+{
+    my $parse = $_[0];
+    my $type = $_[1];
+    if ( $type eq "static" ) {
+	if ( $parse =~ m/^\>\>/ ) {
+	    return 'gtData::json_parse("")';
+	}
+    }
+    if ( $parse =~ m/^\>\>(.*)$/ ) {
+	my $pp = $1;
+	return $pp;
+    }
+    else {
+	return 'gtData::json_parse("'.quote_escape($parse).'")';
+    }
+}
+
+sub gen_property_set
+{
+    my $name = $_[0];
+    my $path = $_[1];
+    my $key = $_[2];
+    my $body = $_[3];
+    if  ( ($path eq "") ||
+	  ($path ne "") && $body->{$key}->{property} ) {
+	return (1,"   ret->set(\"".get_property($name,$body->{$key})."\",dest);\n");
+    }
+    return (0,"   ret1 = dest;\n");
+}
+
+sub gen_encode
+{
+    my $body = $_[0];
+    my $path = $_[1];
+    my $encode_type = $_[2];
+    my $ee_flag = $_[3];
+    my $member = $_[4];
+
+    inherit_other_key($body,"import","decode");
+    inherit_other_key($body,"export","encode");
+
+    if ( $body->{$ee_flag} ) {
+	if ( $body->{$ee_flag} eq "IGNORE" ) {
+	    return "";
+	}
+	if ( $member ) {
+	    if ( $body->{$ee_flag} =~ m/\;$/ ) {
+		return "   ".replace_member($body->{$ee_flag},$member,$body,1)."\n";
+	    }
+	    return "   ".replace_member($body->{$ee_flag},$member,$body,1).";\n";
+	}
+	else {
+	    my $dec = '   gtData * ret = 0,* ret1 = 0;'."\n";
+	    my $out = replace_simple($body->{$ee_flag},'$src',"ret",$body);
+	    my $out = replace_member($out,$member,$body,1);
+	    if ( $body->{$ee_flag} =~ m/\;$/ ) {
+		return $dec."   ".$out."\n";
+	    }
+	    return $dec."   ".$out.";\n";
+	}
+    }
+    elsif ( $body->{activeMember} ) {
+	my @rr = ();
+	my @ret_type = ();
+	my %path_hash = ();
+	foreach ( keys %$body ) {
+	    my $key = $_;
+	    if ( $key =~ m/^member\:(.*)$/ ) {
+		my $name = $1;
+		if ( $body->{$key} eq "IGNORE" ) {
+		    next;
+		}
+		if ( ($path eq "") && ($body->{$key}->{path}) ) {
+		    if ( $encode_type ne "virtual" ) {
+			next;
+		    }
+		    if ( $ee_flag ne "export" ) {
+			next;
+		    }
+		    if ( $path_hash{$body->{$key}->{path}} ) {
+			next;
+		    }
+		    $path_hash{$body->{$key}->{path}} = 1;
+		    my @ps = gen_property_set($name,$path,$key,$body);
+		    push(@rr,
+			 "   ret->set(\"".$body->{$key}->{path}."\",".
+			 reg_path($body->{$key}->{path})."->gtt_export());\n");
+		    $ret_type[1] = 1;
+		    next;
+		}
+		elsif ( ($path ne "") && ($path ne $body->{$key}->{path}) ) {
+		    next;
+		}
+		my @ps = gen_property_set($name,$path,$key,$body);
+		my $enc = gen_encode($body->{$key},$path,$encode_type,$ee_flag,$name);
+		if ( $enc ) {
+		    push(@rr,$enc.$ps[1]);
+		}
+		$ret_type[$ps[0]] = 1;
+	    }
+	    elsif ( $key =~ m/^property\:(.*)/ ) {
+		my $prop = $1;
+		if ( $body->{$key} eq "IGNORE" ) {
+		    next;
+		}
+		if ( $body->{$key}->{$ee_flag} eq "IGNORE" ) {
+		    next;
+		}
+		if ( !$body->{$key}->{property} ) {
+		    $body->{$key}->{property} = $prop;
+		}
+		if ( ($path eq "") && ($body->{$key}->{path}) || 
+		     ($path ne "") && ($path ne $body->{$key}->{path}) ) {
+		    next;
+		}
+		$ret_type[1] = 1;
+		push(@rr,'   ret->set("'.get_property("",$body->{$key}).'",'.get_value($body->{$key}->{value},$encode_type).');'."\n");
+	    }
+	}
+	my $ret = '
+   gtDataHash * ret = 0;
+   gtData * ret1 = 0;
+';
+	if ( $ret_type[1] == 1 ) {
+	    $ret .= '
+   ret = NEW gtDataHash();
+';
+	}
+	return $ret.join("",sort @rr);
+    }
+	
+    else {
+	if ( $member ) {
+	    if ( $ee_flag eq "encode" ) {
+		return replace_member('   $dest = gtt_'.reg_name($body->{type}).'::encode(base,&$src);'."\n",$member,$body,1);
+	    }
+	    else {
+		return replace_member('   $dest = gtt_'.reg_name($body->{type}).'::gtt_export(base,&$src);'."\n",$member,$body,1);
+	    }
+	}
+	else {
+	    return "stdObject::panic(\"undefined $ee_flag instance!!\");\n";
+	}
+    }
+}
+
+sub gen_property_get
+{
+    my $name = $_[0];
+    my $path = $_[1];
+    my $key = $_[2];
+    my $body = $_[3];
+    if  ( ($path eq "") ||
+	  ($path ne "") && $body->{$key}->{property} ) {
+	return (1,"   src = _src->get(\"".get_property($name,$body->{$key})."\");\n");
+    }
+    return (0,"   src = _src;\n");
+}
+
+
+sub gen_decode
+{
+    my $body = $_[0];
+    my $path = $_[1];
+    my $decode_type = $_[2];
+    my $ee_flag = $_[3];
+    my $member = $_[4];
+
+    inherit_other_key($body,"import","decode");
+    inherit_other_key($body,"export","encode");
+
+    if ( $body->{$ee_flag} ) {
+	my $eef = $body->{$ee_flag};
+	my $eeff = 0;
+	if ( $body->{$ee_flag} eq "IGNORE" ) {
+	    return "";
+	}
+	if ( $eef =~ m/^\>\>(.*)$/ ) {
+	    $eef = $1;
+	    $eeff = 1;
+	}
+	if ( $eeff && $decode_type eq "static" ) {
+	    return "";
+	}
+	if ( $member ) {
+	    if ( $body->{$ee_flag} =~ m/\;$/ ) {
+		return "   ".replace_member($eef,$member,$body,2)."\n";
+	    }
+	    return "   ".replace_member($eef,$member,$body,2).";\n";
+	}
+	else {
+	    if ( $body->{$ee_flag} =~ m/\;$/ ) {
+		return "   ".replace_simple($eef,"_src","(*dest)",
+					    {'body' => $body,'argument:property' => $body->{property}})."\n";
+	    }
+	    return "   ".replace_simple($eef,"_src","(*dest)",
+					{'body' => $body,'argument:property' => $body->{property}}).";\n";
+	}
+    }
+    elsif ( $body->{activeMember} ) {
+	my $ret = '
+   gtData * src;
+';
+	my @rr = ();
+	my %path_hash = ();
+	foreach ( keys %$body ) {
+	    my $key = $_;
+	    if ( !($key =~ m/^member\:(.*)$/) ) {
+		next;
+	    }
+	    my $name = $1;
+	    if ( $body->{$key} eq "IGNORE" ) {
+		next;
+	    }
+	    if ( ($path eq "") && ($body->{$key}->{path}) ) {
+		if ( $decode_type ne "virtual" ) {
+		    next;
+		}
+		if ( $ee_flag ne "import" ) {
+		    next;
+		}
+		if ( $path_hash{$body->{$key}->{path}} ) {
+		    next;
+		}
+		$path_hash{$body->{$key}->{path}} = 1;
+		push(@rr,
+		     "   ".reg_path($body->{$key}->{path})."->gtt_import(_src->get(\"".
+		     $body->{$key}->{path}."\"));"."\n");
+		next;
+	    }
+	    elsif ( ($path ne "") && ($path ne $body->{$key}->{path}) ) {
+		next;
+	    }
+	    my @pp = gen_property_get($name,$path,$key,$body);
+#	    my $decc = gen_decode($body->{$key},$path,$decode_type,$ee_flag,$name);
+	    my $decc = gen_decode($body->{$key},$path,"virtual",$ee_flag,$name);
+	    if ( $decc ) {
+		push(@rr,$pp[1].
+		     "   if ( src ) {\n".
+		     $decc.
+		     "   }\n".
+		     "   else {\n".
+		     gen_destroy($body->{$key},$path,"destroy",$name).
+		     "   }\n");
+	    }
+	}
+	return $ret.join("",sort @rr);
+    }
+    else {
+	if ( $member ) {
+	    if ( $ee_flag eq "decode" ) {
+		return replace_member("   gtt_".reg_name($body->{type}).'::decode(base,&$dest,$src);'."\n",$member,$body,2);
+	    }
+	    else {
+		return replace_member("   gtt_".reg_name($body->{type}).'::gtt_import(base,&$dest,$src);'."\n",$member,$body->{ary},2);
+	    }
+	}
+	else {
+	    return "   stdObject::panic(\"undefined $ee_flag instance!!\");\n";
+	}
+    }
+}
+
+sub gen_destroy
+{
+    my $body = $_[0];
+    my $path = $_[1];
+    my $ee_flag = $_[2];
+    my $member = $_[3];
+
+    inherit_other_key($body,"destroy","initial");
+
+    if ( $body->{$ee_flag} ) {
+	if ( $body->{$ee_flag} eq "IGNORE" ) {
+	    return "";
+	}
+	if ( $member ) {
+	    if ( $body->{$ee_flag} =~ m/\;$/ ) {
+		return "   ".replace_member($body->{$ee_flag},$member,$body,2)."\n";
+	    }
+	    return "   ".replace_member($body->{$ee_flag},$member,$body,2).";\n";
+	}
+	else {
+	    my $out = replace_member($body->{$ee_flag},$member,$body,2);
+	    if ( $body->{$ee_flag} =~ m/\;$/ ) {
+		return "   ".$out."\n";
+	    }
+	    return "   ".$out.";\n";
+	}
+    }
+    elsif ( $body->{activeMember} ) {
+	my @rr = ();
+	foreach ( keys %$body ) {
+	    my $key = $_;
+	    if ( !($key =~ m/^member\:(.*)$/) ) {
+		next;
+	    }
+	    my $name = $1;
+	    if ( $body->{$key} eq "IGNORE" ) {
+		next;
+	    }
+	    if ( ($path eq "") && ($body->{$key}->{path}) || 
+		 ($path ne "") && ($path ne $body->{$key}->{path}) ) {
+		next;
+	    }
+	    push(@rr,gen_destroy($body->{$key},$path,$ee_flag,$name));
+	}
+	return join("",sort @rr);
+    }
+    else {
+	if ( $member ) {
+	    if ( !($body->{type} =~ m/\[\]/) ) {
+		return replace_member("   gtt_".reg_name($body->{type}).'::'.$ee_flag.'_node(base,&$dest);'."\n",$member,$body,2);
+	    }
+	    else {
+		if ( $ee_flag eq "updated" ) {
+		    return "";
+		}
+		else {
+		    return "   stdObject::panic(\"undefined $ee_flag instance!!\");\n";
+		}
+	    }
+	}
+	else {
+	    if ( $ee_flag eq "updated" ) {
+		return "";
+	    }
+	    else {
+		return "   stdObject::panic(\"undefined $ee_flag instance!!\");\n";
+	    }
+	}
+    }
+}
+
+
+sub gen_include_inc
+{
+    my $body = $_[0];
+    my $include_path = "";
+    if ( $body->{define} ) {
+	$include_path = '#include "'.replace_simple($body->{define},"","",$body).'"'."\n";
+    }
+    if ( $body->{include} ) {
+	my $inc = $body->{include};
+	if ( $inc =~ m/\=\>/ ) {
+	    my $res = "";
+	    $inc .= "=>";
+	    for ( ; $inc =~ s/^([^\=]+)\=\>// ; ) {
+		my $el = $1;
+		    $res = replace_simple($el,"","",$body);
+		my $path = get_header_filename_include($res);
+		if ( $path ) {
+		    $include_path .= '#include "'.$res.'"'."\n";
+		    last;
+		}
+	    }
+	    if ( $inc eq "" ) {
+		$include_path .= '#include "'.$res.'"'."\n";
+	    }
+	}
+	else {
+	    $inc .= ",";
+	    for ( ; $inc =~ s/^([^,]+),// ; ) {
+		my $el = $1;
+		if ( $el =~ m/^\<(.*)\>$/ ) {
+		    $include_path .= '#include <'.replace_simple($1,"","",$body).'>'."\n";
+		}
+		else {
+		    $include_path .= '#include "'.replace_simple($el,"","",$body).'"'."\n";
+		}
+	    }
+	}
+    }
+    return $include_path;
+}
+
+sub gen_include
+{
+    my $body = $_[0];
+    my $path = $_[1];
+    my $headerpost = $_[2];
+    if ( $body->{activeMember} ) {
+	my @rr = ();
+	my %include_hash = ();
+	foreach ( keys %$body ) {
+	    my $key = $_;
+	    if ( !($key =~ m/^member\:(.*)$/) ) {
+		next;
+	    }
+	    my $name = $1;
+	    if ( $body->{$key} eq "IGNORE" ) {
+		next;
+	    }
+	    if ( ($path eq "") && ($body->{$key}->{path}) || 
+		 ($path ne "") && ($path ne $body->{$key}->{path}) ) {
+		next;
+	    }
+	    if ( $body->{$key}->{type} =~ m/^gtt\_/ ) {
+		if ( $body->{$key}->{type} =~ m/\[\]/ ) {
+		    next;
+		}
+		my $tp = $body->{$key}->{type};
+		$tp =~ s/\*$//g;
+		my $hf = get_header_filename_include(reg_name($tp).'.h');
+		my $res = '#include "'.$hf."\"\n";
+		if ( !$include_hash{$res} ) {
+		    push(@rr,$res);
+		    $include_hash{$res} = 1;
+		}
+		next;
+	    }
+
+	    my $res = gen_include($body->{$key},$path,$headerpost);
+	    if ( $include_hash{$res} ) {
+		next;
+	    }
+	    $include_hash{$res} = 1;
+	    push(@rr,$res);
+	}
+	return join("",sort @rr);
+    }
+    my $res = "";
+    if ( $body->{type} && !($body->{type} =~ m/\[\]/) ) {
+	$res = '#include "'.get_header_filename_include('gtt_'.reg_name($body->{type}).'.h')."\"\n";
+    }
+    if ( $body->{inherit} && !($body->{inherit} =~ m/\[\]/) ) {
+	$res = '#include "'.get_header_filename_include('gtt_'.reg_name($body->{inherit}).'.h')."\"\n";
+    }
+#    if ( $body->{"type:".$body->{type}} ) {
+#	$res .= gen_include($body->{"type:".$body->{type}},$path,$headerpost);
+#    }
+#    if ( $body->{"type:".$body->{inherit}} ) {
+#	$res .= gen_include($body->{"type:".$body->{inherit}},$path,$headerpost);
+#    }
+    if ( $body->{include} && !($body->{include} =~ m/\[\]/) ) {
+	$res .= gen_include_inc($body);
+    }
+    return $res;
+}
+
+
+sub gen_parasite
+{
+    my $line = $_[0];
+    my @ps = split /[ \t]*,[ \t]*/,$line;
+    my $out = "";
+    foreach ( @ps ) {
+	my $ps1 = $_;
+	$out .= "\tNEW $ps1(ifThis);\n";
+    }
+    return $out;
+}
+
+sub gen_helper
+{
+    my $line = $_[0];
+    my $type = $_[1];
+    my $class;
+    my $launch;
+    if ( !$line ) {
+	return "";
+    }
+    if ( $line =~ m/NEW[ \t]+([a-zA-Z0-9_]+)/ ) {
+	$class = $1;
+	$launch = "";
+    }
+    elsif ( $line =~ m/NEW[ \t]*\(([a-zA-Z0-9_]+)\)[\n\r \t]*([a-zA-Z0-9_]+)/ ) {
+	$class = $1;
+	$launch = $2;
+	$line =~ s/NEW[ \t]*\([a-zA-Z0-9_]+\)[\n\r \t]*/NEW /;
+    }
+    else {
+	die "invalid helper definition $type $line\n";
+    }
+    if ( $type eq "dec" ) {
+	return "   $class *& helper;";
+    }
+    elsif ( $type eq "init" ) {
+	return ",helper(($class*&)TS_BASECLASS::helper)";
+    }
+    elsif ( ($type eq "new") && !$launch ) {
+	return '   REF_SET(helper,('.$line.'));
+    invoke_listen(NEW stdEvent(TSE_UPDATED,
+			      ifThis,
+			      helper));
+    ';
+    }
+    elsif ( ($type eq "new") && $launch ) {
+	return "   ".$line.";\n".
+	    '   return INI_HELPER_LAUNCH_WAIT;
+}
+TS_STATE(INI_HELPER_LAUNCH_WAIT)
+{
+    if ( ev->type != TSE_RETURN )
+	return 0;
+    REF_SET(helper,dynamic_cast<'.$class.'*>(ev->msg_obj));
+    invoke_listen(NEW stdEvent(TSE_UPDATED,
+			      ifThis,
+			      helper));
+';
+    }
+    elsif ( $type eq "detach-wait" ) {
+	return "if ( helper && helper->detach() == 0 ) return 0;"
+    }
+    elsif ( $type eq "fin" ) {
+	return "   REF_SET(helper,0);";
+    }
+}
+
+sub gen_typeSpace
+{
+    my $body = $_[0];
+    my $className = $_[1];
+    my $ts = $body->{typeSpace};
+    if ( !$ts ) {
+	return "";
+    }
+    if ( !($ts =~ m/^(.*)\:(.*)$/) ) {
+	die "invalid typeSpace ($ts)";
+    }
+    my $typeSpace = $1;
+    my $typeNameList = $2;
+    my @tnl = split /[ \t]*,[ \t]*/,$typeNameList;
+    my $first = "";
+    foreach ( @tnl ) {
+	my $tn = $_;
+	my $f = gen_typeSpace__($body,$className,$typeSpace,$tn);
+	if ( !$first ) {
+	    $first = $f;
+	}
+    }
+    return $first;
+}
+
+sub gen_typeSpace__
+{
+    my $body = $_[0];
+    my $className = $_[1];
+    my $typeSpace = $_[2];
+    my $typeName = $_[3];
+    my $dd;
+    $dd = $typeName."[".$className."]";
+
+    if ( $global_typeSpace{$typeSpace} ) {
+	my $ee = $global_typeSpace{$typeSpace};
+	my $d = $dd;
+	$d =~ s/\[/\\[/g;
+	$d =~ s/\]/\\]/g;
+	$ee = ",".$ee.",";
+	if ( !($ee =~ m/,$d,/) ) {
+	    $global_typeSpace{$typeSpace} .= ",".$dd;
+	}
+	if ( $body->{outputEnable} ne "off" ) {
+	    $global_typeSpace{$typeSpace} =~ s/^\:off\://;
+	}
+    }
+    else {
+	if ( $body->{outputEnable} eq "off" ) {
+	    $global_typeSpace{$typeSpace} = ":off:".$dd;
+	}
+	else {
+	    $global_typeSpace{$typeSpace} = $dd;
+	}
+    }
+    return 'type("'.$typeName.'");';
+}
+
+sub gen_sub_gtt
+{
+    my $body = $_[0];
+    my $path = $_[1];
+    my $func = $_[2];
+    my $header = $_[3];
+    my $headerpost = $_[4];
+    if ( !$body->{activeMember} ) {
+	return "";
+    }
+    if ( $path ne "" ) {
+	return "";
+    }
+    my @rr = ();
+    my %path_hash = ();
+    foreach ( keys %$body ) {
+	my $key = $_;
+	if ( !($key =~ m/^member\:(.*)$/) ) {
+	    next;
+	}
+	my $name = $1;
+	my $path = $body->{$key}->{path};
+	if ( !$path ) {
+	    next;
+	}
+	if ( $path_hash{$path} ) {
+	    next;
+	}
+	$path_hash{$path} = 1;
+	push(@rr,&$func($name,$body,$path,$header,$headerpost));
+    }
+    return join("",sort @rr);
+}
+
+sub gen_sub_gtt_encode
+{
+    my $body = $_[0];
+    my $path = $_[1];
+    my $header = $_[3];
+    my $headerpost = $_[4];
+    my $dd = gen_sub_gtt($body,$path,"func_encode_gtt");
+    if ( !$dd ) {
+	return $dd;
+    }
+    return '   gtDataArray * sys = NEW gtDataArray();
+'.$dd.'
+    if ( ret == 0 )
+         ret = NEW gtDataHash();
+    ret->set("__SYS",sys);
+';
+}
+
+sub func_dec_gtt
+{
+    my $name = $_[0],
+    my $body = $_[1];
+    my $path = $_[2];
+    return "   gtt_".$body->{name}."__".reg_path($path)."*".reg_path($path).";\n";
+}
+sub func_dec_header
+{
+    my $name = $_[0],
+    my $body = $_[1];
+    my $path = $_[2];
+    my $header = $_[3];
+    my $headerpost = $_[4];
+    return '#include   "'.get_header_filename_include('gtt_'.$body->{name}.'__'.reg_path($path).'.h')."\"\n";
+}
+sub func_encode_gtt
+{
+    my $name = $_[0],
+    my $body = $_[1];
+    my $path = $_[2];
+    my $header = $_[3];
+    my $headerpost = $_[4];
+    return
+	'   sys->push(NEW gtDataString(this->'.reg_path($path).'->uri()));'."\n";
+}
+sub func_new_gtt
+{
+    my $name = $_[0],
+    my $body = $_[1];
+    my $path = $_[2];
+    my $header = $_[3];
+    my $headerpost = $_[4];
+    return 
+	'   REF_SET(this->'.reg_path($path).',NEW gtt_'.$body->{name}.'__'.reg_path($path).'(ifThis,"'.
+	get_path($name,$body->{"member:".$name}).'",src_ptr,dest_ptr));
+        this->'.reg_path($path).'->listen(ifThis,TSE_UPDATED,handler_GT_items);
+';
+}
+sub func_destroy_gtt
+{
+    my $name = $_[0],
+    my $body = $_[1];
+    my $path = $_[2];
+    my $header = $_[3];
+    my $headerpost = $_[4];
+    return 
+'   this->'.reg_path($path).'->listen(ifThis,TSE_STATE);
+   this->'.reg_path($path).'->destroy();
+';
+}
+sub func_destroy_gtt_RET
+{
+    my $name = $_[0],
+    my $body = $_[1];
+    my $path = $_[2];
+    my $header = $_[3];
+    my $headerpost = $_[4];
+    return 
+'   if ( C_TEST(this->'.reg_path($path).'->state,C_ZOM) == 0 )
+        return 0;
+';
+}
+
+sub func_destroy_gtt_SET_ZERO
+{
+    my $name = $_[0],
+    my $body = $_[1];
+    my $path = $_[2];
+    my $header = $_[3];
+    my $headerpost = $_[4];
+    return 
+'   REF_SET(this->'.reg_path($path).',0);
+';
+}
+
+sub func_report
+{
+    my $name = $_[0],
+    my $body = $_[1];
+    my $path = $_[2];
+    my $header = $_[3];
+    my $headerpost = $_[4];
+    return 'if ( this->'.reg_path($path).'->report(ifThis) ) ret = 1;
+';
+}
+
+sub func_reset
+{
+    my $name = $_[0],
+    my $body = $_[1];
+    my $path = $_[2];
+    my $header = $_[3];
+    my $headerpost = $_[4];
+    return 
+'   this->'.reg_path($path).'->reset();
+';
+}
+
+
+sub output_class
+{
+    my $org = $_[0];
+    my $body = $_[1];
+    my $targetPath = $_[2];
+    my $dir = $_[3];
+    my $header = $_[4];
+    my $headerpost = $_[5];
+    my $className = "gtt_".$body->{name};
+    if ( $body->{outputEnable} eq "off" ) {
+	return;
+    }
+    if ( $targetPath ne "" ) {
+	$className .= "__".reg_path($targetPath);
+    }
+    my $baseClassPath = "gt2/c++/gtTypeAction";
+    my $baseClassInitial = $body->{baseClassInitial};
+    my $baseClassDestroy = $body->{baseClassDestroy};
+    if ( $body->{baseClassPath} ) {
+	$baseClassPath = $body->{baseClassPath};
+    }
+    $baseClassPath =~ m/([^\/]+)$/;
+    my $baseClass = $1;
+
+    open(OUT,">$dir/.$className.cpp");
+    print OUT '
+
+#include "_ts2/c++/'.$className.'_.h"
+'.gen_include($body,$targetPath,$headerpost).'
+
+CLASS_TINYSTATE('.$headerpost.'/'.$className.','.$baseClassPath.')
+
+#if 0
+
+TS_BEGIN_IMPLEMENT
+
+#include "gt2/c++/gt.h"
+#include "ts2/c++/stdArray.h"
+
+'.gen_sub_gtt($body,$targetPath,"func_dec_header",$header,$headerpost).'
+
+#define DENY
+#define IGNORE
+
+class TS_THISCLASS : public TS_BASECLASS {
+public:
+  '.$className.'_(tinyState * parent,const char * _path);
+  void inherit(tinyState * parent,const char * _path);
+  '.$className.'_(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).');
+  void inherit(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).');
+  '.$className.'_(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).');
+  void inherit(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).');
+  '.$className.'_(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).',int uriMode);
+  void inherit(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).',int uriMode);
+  '.$className.'_(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).',int uriMode,'.$className.'*org);
+  void inherit(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).',int uriMode,'.$className.'*org);
+
+  '.dec_var_ptr("gtt_src()",$body).';
+  virtual int report();
+  virtual int report(tinyState * esc);
+  virtual void reset();
+  '.$className.'*gtt_copy(tinyState * base);
+  '.$className.'*gtt_ptr(tinyState * base);
+  virtual '.$className.'*gtt_refer();
+  virtual gtData * gtt_export();
+  virtual void gtt_import(gtData * src);
+  virtual void gtt_import_struct(void * src);
+  virtual void gtt_updated();
+
+  '.gen_helper($body->{helper},"dec").'
+private:
+
+'.gen_sub_gtt($body,$targetPath,"func_dec_gtt").'
+
+  '.dec_var_ptr("src_ptr",$body).';
+  '.dec_var_ptr("dest_ptr",$body).';
+  '.dec_var_ptr("buffer_ptr",$body).';
+  stdArray<uint8_t,false> * src_area;
+  stdArray<uint8_t,false> * dest_area;
+  stdArray<uint8_t,false> * buffer_area;
+
+protected:
+  virtual void copy();
+  virtual gtData * encode();
+  virtual void decode(gtData * src);
+  virtual void copy_to_buffer();
+  virtual void copy_from_buffer();
+
+};
+
+TS_END_IMPLEMENT
+
+TS_BEGIN_INTERFACE
+
+class TS_INTERFACE : public TS_BASEINTERFACE {
+public:
+  static void copy(gtType * base,'.dec_var_ptr("dest",$body).','.dec_var_ptr("src",$body).');
+  static int compare(gtType * base,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).');
+  static gtData * encode(gtType * base,'.dec_var_ptr("src",$body).');
+  static void decode(gtType * base,'.dec_var_ptr("dest",$body).',gtData * src);
+  static void destroy_node(gtType * base,'.dec_var_ptr("dest",$body).');
+  static void initial_node(gtType * base,'.dec_var_ptr("dest",$body).');
+  static void updated_node(gtType * base,'.dec_var_ptr("dest",$body).');
+  static gtData * gtt_export(gtType * base,'.dec_var_ptr("src",$body).');
+  static void gtt_import(gtType * base,'.dec_var_ptr("dest",$body).',gtData * src);
+};
+
+TS_END_INTERFACE
+
+
+#endif
+
+
+
+/*******************************************
+	PUBLIC FUNCTIONS STATIC
+********************************************/
+void
+'.$className.'::copy(gtType * base,'.dec_var_ptr("dest",$body).','.dec_var_ptr("src",$body).')
+{
+'.gen_copy($body,$targetPath).'
+}
+int
+'.$className.'::compare(gtType * base,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).')
+{
+    int result = 1;
+'.gen_compare($body,$targetPath).'
+   return 1;
+}
+gtData * 
+'.$className.'::encode(gtType * base,'.dec_var_ptr("src",$body).')
+{
+   gtData * dest;
+'.gen_encode($body,$targetPath,"static","encode").'
+   return (ret1 ? ret1 : ret);
+}
+gtData * 
+'.$className.'::gtt_export(gtType * base,'.dec_var_ptr("src",$body).')
+{
+   gtData * dest;
+'.gen_encode($body,$targetPath,"static","export").'
+   return (ret1 ? ret1 : ret);
+}
+void 
+'.$className.'::decode(gtType * base,'.dec_var_ptr("dest",$body).',gtData * _src)
+{
+'.gen_decode($body,$targetPath,"static","decode").'
+}
+void
+'.$className.'::gtt_import(gtType * base,'.dec_var_ptr("dest",$body).',gtData * _src)
+{
+    if ( _src == 0 )
+	return;
+'.gen_decode($body,$targetPath,"static","import").'
+}
+void 
+'.$className.'::destroy_node(gtType * base,'.dec_var_ptr("dest",$body).')
+{
+'.gen_destroy($body,$targetPath,"destroy").'
+}
+void
+'.$className.'::initial_node(gtType * base,'.dec_var_ptr("dest",$body).')
+{
+'.gen_destroy($body,$targetPath,"initial").'
+}
+void
+'.$className.'::updated_node(gtType * base,'.dec_var_ptr("dest",$body).')
+{
+'.gen_destroy($body,$targetPath,"updated").'
+}
+
+
+/*******************************************
+	PUBLIC FUNCTIONS OTHERS
+********************************************/
+
+'.$className.'_::'.$className.'_(tinyState * parent,const char * _path)
+    : '.$baseClass.'_(parent,_path,GT_TYPE_ORG)'.gen_helper($body->{helper},"init").'
+{
+    '.gen_typeSpace($body,$className).'
+    REF_SET(src_area,(NEW stdArray<uint8_t,false>(sizeof('.dec_var("",$body).'))));
+    REF_SET(dest_area,(NEW stdArray<uint8_t,false>(sizeof('.dec_var("",$body).'))));
+    src_ptr = ('.dec_var_ptr("",$body).')&src_area->ary[0];
+    dest_ptr = ('.dec_var_ptr("",$body).')&dest_area->ary[0];
+}
+
+void
+'.$className.'_::inherit(tinyState * parent,const char * _path)
+{
+    this->TS_BASECLASS::inherit(parent,_path,GT_TYPE_ORG);
+}
+
+'.$className.'_::'.$className.'_(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).')
+    : '.$baseClass.'_(parent,_path,GT_TYPE_ORG)'.gen_helper($body->{helper},"init").'
+{
+    '.gen_typeSpace($body,$className).'
+    if ( src )
+	src_ptr = src;
+    else {
+	REF_SET(src_area,(NEW stdArray<uint8_t,false>(sizeof('.dec_var("",$body).'))));
+	src_ptr = ('.dec_var_ptr("",$body).')&src_area->ary[0];
+    }
+    REF_SET(dest_area,(NEW stdArray<uint8_t,false>(sizeof('.dec_var("",$body).'))));
+    dest_ptr = ('.dec_var_ptr("",$body).')&dest_area->ary[0];
+}
+
+void
+'.$className.'_::inherit(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).')
+{
+    this->TS_BASECLASS::inherit(parent,_path,GT_TYPE_ORG);
+}
+
+'.$className.'_::'.$className.'_(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).')
+    : '.$baseClass.'_(parent,_path,GT_TYPE_ORG)'.gen_helper($body->{helper},"init").'
+{
+    '.gen_typeSpace($body,$className).'
+    if ( src )
+	src_ptr = src;
+    else {
+	REF_SET(src_area,(NEW stdArray<uint8_t,false>(sizeof('.dec_var("",$body).'))));
+	src_ptr = ('.dec_var_ptr("",$body).')&src_area->ary[0];
+    }
+    if ( dest )
+	dest_ptr = dest;
+    else {
+	REF_SET(dest_area,(NEW stdArray<uint8_t,false>(sizeof('.dec_var("",$body).'))));
+	dest_ptr = ('.dec_var_ptr("",$body).')&dest_area->ary[0];
+    }
+}
+
+void
+'.$className.'_::inherit(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).')
+{
+    this->TS_BASECLASS::inherit(parent,_path,GT_TYPE_ORG);
+}
+
+'.$className.'_::'.$className.'_(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).',int uriMode)
+    : '.$baseClass.'_(parent,_path,uriMode)'.gen_helper($body->{helper},"init").'
+{
+    '.gen_typeSpace($body,$className).'
+    if ( uriMode != GT_TYPE_ORG )
+	return;
+    if ( src )
+	src_ptr = src;
+    else {
+	REF_SET(src_area,(NEW stdArray<uint8_t,false>(sizeof('.dec_var("",$body).'))));
+	src_ptr = ('.dec_var_ptr("",$body).')&src_area->ary[0];
+    }
+    if ( dest )
+	dest_ptr = dest;
+    else {
+	REF_SET(dest_area,(NEW stdArray<uint8_t,false>(sizeof('.dec_var("",$body).'))));
+	dest_ptr = ('.dec_var_ptr("",$body).')&dest_area->ary[0];
+    }
+}
+
+void
+'.$className.'_::inherit(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).',int uriMode)
+{
+    this->TS_BASECLASS::inherit(parent,_path,GT_TYPE_ORG);
+}
+
+'.$className.'_::'.$className.'_(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).',int uriMode,'.$className.' * org)
+    : '.$baseClass.'_(parent,org)'.gen_helper($body->{helper},"init").'
+{
+    '.gen_typeSpace($body,$className).'
+}
+
+void
+'.$className.'_::inherit(tinyState * parent,const char * _path,'.dec_var_ptr("src",$body).','.dec_var_ptr("dest",$body).',int uriMode,'.$className.' * org)
+{
+    this->TS_BASECLASS::inherit(parent,org);
+}
+
+
+
+'.$className.' *
+'.$className.'_::gtt_copy(tinyState * base)
+{
+    switch ( uri_mode ) {
+	case GT_TYPE_PTR:
+	    return NEW '.$className.'(base,0,0,0,GT_TYPE_PTR,ifThis);
+	case GT_TYPE_COPY:
+	case GT_TYPE_ORG:
+        default:
+	    if ( partial_path )
+		return NEW '.$className.'(parent,&partial_path->ary[0],0,0,GT_TYPE_COPY);
+	    else
+		return NEW '.$className.'(parent,0,0,0,GT_TYPE_COPY);
+    }
+}
+
+'.$className.' *
+'.$className.'_::gtt_refer()
+{
+    return dynamic_cast<'.$className.'*>(ptrorg);
+}
+
+'.$className.' *
+'.$className.'_::gtt_ptr(tinyState * base)
+{
+    return NEW '.$className.'(base,0,0,0,GT_TYPE_PTR,ifThis);
+}
+
+int
+'.$className.'_::report()
+{
+    if ( C_TEST(state,C_ZOM|C_FIN) )
+	return 0;
+    return report(0);
+}
+
+int
+'.$className.'_::report(tinyState * esc)
+{
+    int ret;
+    if ( '.$className.'::compare(ifThis,src_ptr,dest_ptr) == 0 ) {
+	'.replace_simple($body->{dynamicPath},"(*src_ptr)","(*dest_ptr)",$body).'
+	set_report_escape(esc);
+	wakeup();
+	return 1;
+    }
+    ret = 0;
+    '.gen_sub_gtt($body,$targetPath,"func_report").'
+    return ret;
+}
+
+void
+'.$className.'_::reset()
+{
+    '.$className.'::initial_node(ifThis,src_ptr);
+'.gen_sub_gtt($body,$targetPath,"func_reset").'
+    report();
+}
+
+
+void
+'.$className.'_::copy()
+{
+    '.$className.'::copy(ifThis,dest_ptr,src_ptr);
+}
+
+gtData *
+'.$className.'_::encode()
+{
+    gtData * dest;
+    gtType * base = ifThis;
+   '.dec_var_ptr("src",$body).' = src_ptr;
+'.gen_encode($body,$targetPath,"virtual","encode").'
+'.gen_sub_gtt_encode($body,$targetPath).'
+   return (ret1 ? ret1 : ret);
+}
+
+void
+'.$className.'_::decode(gtData * src)
+{
+    if ( src == 0 )
+	return;
+    '.$className.'::decode(ifThis,src_ptr,src);
+}
+
+gtData *
+'.$className.'_::gtt_export()
+{
+   gtData * dest;
+   gtType * base = ifThis;
+   if ( uri_mode != GT_TYPE_ORG ) 
+       return NEW gtDataString(uri());
+   '.dec_var_ptr("src",$body).' = src_ptr;
+'.gen_encode($body,$targetPath,"virtual","export").'
+   return (ret1 ? ret1 : ret);
+}
+
+void
+'.$className.'_::gtt_import(gtData * _src)
+{
+    if ( _src == 0 )
+	return;
+    '.dec_var_ptr("dest",$body).' = src_ptr;
+    if ( uri_mode != GT_TYPE_ORG )
+	return;
+    gtType * base = ifThis;
+'.gen_decode($body,$targetPath,"virtual","import").'
+    report();
+}
+
+void
+'.$className.'_::gtt_import_struct(void * __src)
+{
+    if ( __src == 0 )
+	return;
+    '.$className.'::copy(ifThis,src_ptr,('.reg_name($body->{type}).'_type*)__src);
+}
+
+'.dec_var_ptr("\n ".$className."_::gtt_src()",$body).'
+{
+    return src_ptr;
+}
+
+void
+'.$className.'_::copy_to_buffer()
+{
+    if ( buffer_ptr == 0 ) {
+	REF_SET(buffer_area,(NEW stdArray<uint8_t,false>(sizeof('.dec_var("",$body).'))));
+	buffer_ptr = ('.dec_var_ptr("",$body).')&buffer_area->ary[0];
+    }
+    '.$className.'::copy(ifThis,buffer_ptr,src_ptr);
+}
+
+void
+'.$className.'_::copy_from_buffer()
+{
+    if ( buffer_ptr == 0 )
+	return;
+    '.$className.'::copy(ifThis,src_ptr,buffer_ptr);
+    '.$className.'::destroy_node(ifThis,buffer_ptr);
+    REF_SET(buffer_area,0);
+    buffer_ptr = 0;
+    report();
+}
+
+void
+'.$className.'_::gtt_updated()
+{
+    '.$className.'::updated_node(ifThis,src_ptr);
+}
+
+
+
+/*******************************************
+	STATE MACHINE
+********************************************/
+
+TS_STATE(INI_gtTypeAction_PLUGIN)
+{
+'.gen_sub_gtt($body,$targetPath,"func_new_gtt").'
+    '.$className.'::initial_node(ifThis,src_ptr);
+    '.$className.'::initial_node(ifThis,dest_ptr);
+    reset();'.$baseClassInitial.'
+    return rDO|INI_gtTypeAction_PLUGIN_FINISH;
+}
+
+TS_STATE(INI_gtTypeAction_FINISH)
+{
+    interrest_finish();
+  '.gen_parasite($body->{parasite}).'
+  '.gen_helper($body->{helper},"new").'
+    return rDO|ACT_START;
+}
+
+
+TS_STATE(FIN_START)
+{
+  '.$baseClassDestroy.gen_helper($body->{helper},"detach-wait").'
+  '.gen_helper($body->{helper},"fin").'
+    interrest_finish();
+    '.$className.'::destroy_node(ifThis,src_ptr);
+    '.$className.'::destroy_node(ifThis,dest_ptr);
+    if ( buffer_ptr ) '.$className.'::destroy_node(ifThis,buffer_ptr);
+'.gen_sub_gtt($body,$targetPath,"func_destroy_gtt").'
+    return rDO|FIN_WAIT;
+}
+TS_STATE(FIN_WAIT)
+{
+'.gen_sub_gtt($body,$targetPath,"func_destroy_gtt_RET").'
+    return wait_finish(rDO|FIN_WAIT_NEXT);
+}
+TS_STATE(FIN_WAIT_NEXT)
+{
+'.gen_sub_gtt($body,$targetPath,"func_destroy_gtt_SET_ZERO").'
+    REF_SET(src_area,0);
+    REF_SET(dest_area,0);
+    REF_SET(buffer_area,0);
+    return rDO|FIN_gtTypeAction_START;
+}
+
+
+';
+    close(OUT);
+
+    
+    my $include_path = "";
+#    $include_path = gen_include($body,$targetPath,$headerpost);
+    $include_path = gen_include_inc($body,$include_path);
+
+    open(OUT,">$header/$headerpost/.$className.h");
+    print OUT '
+
+#ifndef ___'.$className.'_cpp_H___
+#define ___'.$className.'_cpp_H___
+
+'.$include_path.'
+
+typedef '.dec_var_org(reg_name($body->{type})."_type",$body).';
+
+#include "_ts2/c++/'.$className.'_pb.h"
+
+#endif
+
+';
+    close(OUT);
+}
+
+
+sub output_classes_path
+{
+    my $org = $_[0];
+    my $body = $_[1];
+    my $bodydir = $_[2];
+    my $headerdir = $_[3];
+    my $headerpost = $_[4];
+    my %path_list = ();
+
+    foreach ( keys %$body ) {
+	my $key = $_;
+	if ( !($key =~ m/^member\:(.*)/) ) {
+	    next;
+	}
+	my $path = $body->{$key}->{path};
+	if ( !$path ) {
+	    next;
+	}
+	if ( $path_list{$path} ) {
+	    next;
+	}
+	$path_list{$path} = 1;
+	output_class($org,$body,$path,$bodydir,$headerdir,$headerpost);
+    }
+}
+
+
+sub output_classes
+{
+    my $inp = $_[0];
+    if ( !$inp->{bodydir} ) {
+	die "undefined bodydir\n";
+    }
+    if ( !$inp->{headerdir} ) {
+	die "undefined headerdir\n";
+    }
+    if ( !$inp->{headerpost} ) {
+	die "undefined headerpost\n";
+    }
+    my $bodydir = $base_dir."/".$inp->{bodydir};
+    my $headerdir = $base_dir."/".$inp->{headerdir};
+    my $headerpost = $inp->{headerpost};
+    system("mkdir -p $bodydir");
+    system("mkdir -p $headerdir/$headerpost");
+    foreach ( keys %$inp ) {
+	my $key = $_;
+	if ( !($key =~ m/^type\:(.*)$/) ) {
+	    next;
+	}
+	my $org = $1;
+	if ( $org =~ m/\[\]/ ) {
+	    next;
+	}
+	output_class($org,$inp->{$key},"",$bodydir,$headerdir,$headerpost);
+	output_classes_path($org,$inp->{$key},$bodydir,$headerdir,$headerpost);
+    }
+}
+
+sub output_typeSpace
+{
+    my $typeSpace = $_[0];
+    my $dir = $_[1];
+    my $headerpost = $_[2];
+    open(OUT,">$base_dir/$dir/.gtts_$typeSpace.cpp");
+    print OUT '
+
+#include "'.$headerpost.'/gtts_'.$typeSpace.'.h"
+#include "gt2/c++/gtType.h"
+';
+    my $nameList = $global_typeSpace{$typeSpace};
+    for ( ; $nameList =~ s/([^,]+)\[([^\[\]\,]+)\](,|$)// ; ) {
+        my $name = $1;
+        my $class = $2;
+	print OUT
+'#include "'.$headerpost.'/'.$class.'.h"
+';
+    }
+
+    print OUT
+'
+gtts_'.$typeSpace.'::gtts_'.$typeSpace.'(
+        tinyState * parent,
+        const char * partial_path)
+   : gtTypeSpace(parent,partial_path)
+{
+}
+
+
+gtts_'.$typeSpace.'::~gtts_'.$typeSpace.'()
+{
+}
+
+int
+gtts_'.$typeSpace.'::switching(
+    stdString * type,
+    gtType ** base)
+{
+    (*base)->destroy();
+    if ( STR_NULL(type)->cmp("") == 0 ) {
+	REF_SET(*base,NEW gtType(parent));
+    }
+';
+    my $nameList = $global_typeSpace{$typeSpace};
+    for ( ; $nameList =~ s/([^,]+)\[([^\[\]\,]+)\](,|$)// ; ) {
+        my $name = $1;
+        my $class = $2;
+
+        print OUT '
+    else if ( type->cmp("'.$name.'") == 0 ) {
+	REF_SET(*base,NEW '.$class.'(parent,partial_path->get_str()));
+    }';
+
+    }
+    print OUT
+'
+    else {
+	return -1;
+    }
+    (*base)->activate(this,base);
+    return 0;
+}
+
+stdString *
+gtts_'.$typeSpace.'::next_typeName(
+    stdString * type)
+{
+    if ( STR_NULL(type)->cmp("") == 0 ) {
+';
+    my $nameList = $global_typeSpace{$typeSpace};
+    for ( ; $nameList =~ s/([^,]+)\[([^\[\]\,]+)\](,|$)// ; ) {
+        my $name = $1;
+        my $class = $2;
+
+        print OUT '
+	    return NEW stdString("'.$name.'");
+    }
+    else if ( type->cmp("'.$name.'") == 0 ) {
+';
+
+    }
+    print OUT
+'      return 0;
+    }
+    return 0;
+}
+
+int
+gtts_'.$typeSpace.'::is_member(
+    stdString * type)
+{
+    if ( STR_NULL(type)->cmp("") == 0 )
+	return 0;
+';
+    my $nameList = $global_typeSpace{$typeSpace};
+    for ( ; $nameList =~ s/([^,]+)\[([^\[\]\,]+)\](,|$)// ; ) {
+        my $name = $1;
+        my $class = $2;
+
+        print OUT '
+	    if ( type->cmp("'.$name.'") == 0 )
+		return 1;
+';
+
+    }
+    print OUT
+'    return 0;
+}
+
+';
+    close(OUT);
+}
+
+sub output_typeSpace_header
+{
+    my $typeSpace = $_[0];
+    my $header = $_[1];
+    my $headerpost = $_[2];
+    open(OUT,">$base_dir/$header/$headerpost/.gtts_$typeSpace.h");
+    print OUT '
+
+#ifndef ___gtts_'.$typeSpace.'_cpp_H___
+#define ___gtts_'.$typeSpace.'_cpp_H___
+
+#include "gt2/c++/gtTypeSpace.h"
+
+class gtts_'.$typeSpace.' : public gtTypeSpace {
+public:
+    gtts_'.$typeSpace.'(tinyState * pr = 0,const char * path = 0);
+    ~gtts_'.$typeSpace.'();
+    virtual int switching(stdString * type,gtType ** base);
+    virtual stdString * next_typeName(stdString * type);
+    static int is_member(stdString * type);
+};
+
+#endif
+
+';
+    close(OUT);
+}
+
+
+sub output_typeSpaces
+{
+    my $inp = $_[0];
+    if ( !$inp->{bodydir} ) {
+	die "undefined bodydir\n";
+    }
+    if ( !$inp->{headerdir} ) {
+	die "undefined headerdir\n";
+    }
+    if ( !$inp->{headerpost} ) {
+	die "undefined headerpost\n";
+    }
+    my $bodydir = $inp->{bodydir};
+    my $headerdir = $inp->{headerdir};
+    my $headerpost = $inp->{headerpost};
+
+    foreach ( keys %global_typeSpace ) {
+	my $ts = $_;
+	if ( $ts =~ m/^\:off\;/ ) {
+	    next;
+	}
+	output_typeSpace($ts,$bodydir,$headerpost);
+	output_typeSpace_header($ts,$headerdir,$headerpost);
+    }
+}
+
+sub diff_updated
+{
+
+    my $dir = $_[0];
+    $dir = $base_dir."/".$dir;
+    open(IN,"ls -a1 $dir|");
+    my %new_list = ();
+    my %old_list = ();
+    while(<IN>) {
+	my $line = $_;
+	$line =~ s/[\n\r]//g;
+	if ( $line eq "." ) {
+	    next;
+	}
+	if ( $line eq ".." ) {
+	    next;
+	}
+	if ( !($line =~ m/(\.h|\.cpp)$/) ) {
+	    next;
+	}
+	if ( $line =~ m/^\./ ) {
+	    $new_list{substr($line,1)} = 1;
+	}
+	else {
+	    $old_list{$line} = 1;
+	}
+    }
+    close(IN);
+    foreach ( keys %old_list ) {
+	my $file = $_;
+	if ( $new_list{$file} ) {
+	    next;
+	}
+	system("rm -rf $dir/$file");
+    }
+    foreach ( keys %new_list ) {
+	my $file = $_;
+	if ( $old_list{$file} ) {
+	    open(IN,"diff $dir/.$file $dir/$file|");
+	    my $data = "";
+	    while(<IN>) {
+		$data .= $_;
+	    }
+	    close(IN);
+	    if ( $data ) {
+		system("mv -f $dir/.$file $dir/$file");
+	    }
+	    else {
+		system("rm -rf $dir/.$file");
+	    }
+	}
+	else {
+	    system("mv -f $dir/.$file $dir/$file");
+	}
+    }
+}
+
+
+my $data = load_file_top($ARGV[0]);
+
+setup_global($data);
+reg_template($data);
+
+$data = reg_name_list($data);
+$data = reg_define($data);
+$data = reg_member($data);
+output_classes($data);
+output_typeSpaces($data);
+diff_updated($data->{bodydir});
+diff_updated($data->{headerdir}."/".$data->{headerpost});
+if ( $dep_file ) {
+    save_dep_file($dep_file);
+}
+
+#print STDERR "RESULT ".Dumper($data);
+
+exit(0);
+

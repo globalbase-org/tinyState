@@ -1,0 +1,11 @@
+:root {
+    --page-font-size: 14px;
+    --navigation-font-size: 14px;
+    --toc-font-size: 14px;
+    --code-font-size: 14px;
+    --title-font-size: 16px;
+    /* doxygen-awesome-sidebar-only sets --top-height:120px on `html`.
+       Using :root (higher specificity) to increase it so the search box
+       below the project title is not clipped by overflow:hidden. */
+    --top-height: 150px;
+}

@@ -1,0 +1,9 @@
+### TRANSFER STAGE:0 MAIN:10
+PROG=$1
+PREFIX=$2
+ARCH_PATH=$3
+
+MODE=g-w,o-w
+OWNER=root
+GROUP=wheel
+

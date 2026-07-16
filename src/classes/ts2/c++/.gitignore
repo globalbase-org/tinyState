@@ -1,0 +1,6 @@
+# gitcopy ../../arch/posix_Linux/src/classes/ts2/c++ BEGIN
+tsSignalCore.cpp
+# gitcopy ../../arch/posix_Linux/src/classes/ts2/c++ END
+# gitcopy ../../arch/posix/src/classes/ts2/c++ BEGIN
+stdOpenSSL.cpp
+# gitcopy ../../arch/posix/src/classes/ts2/c++ END

@@ -1,0 +1,167 @@
+# tinyState Doxyfile
+
+#---------------------------------------------------------------------------
+# Project
+#---------------------------------------------------------------------------
+PROJECT_NAME           = "tinyState"
+PROJECT_NUMBER         = "2.0.0"
+PROJECT_BRIEF          = "Lightweight pseudo-coroutine framework — write state machines, forget threads."
+PROJECT_LOGO           =
+OUTPUT_DIRECTORY       = build/doxygen
+OUTPUT_LANGUAGE        = English
+CREATE_SUBDIRS         = NO
+
+#---------------------------------------------------------------------------
+# Input
+#---------------------------------------------------------------------------
+INPUT                  = src/h \
+                         build/_ts2 \
+                         build/tinyState_config.h \
+                         docs \
+                         CLAUDE.md
+INPUT_ENCODING         = UTF-8
+FILE_PATTERNS          = *.h *.hpp *.md
+RECURSIVE              = YES
+
+EXCLUDE                =
+EXCLUDE_SYMLINKS       = NO
+# 注意: */build/* と書くと proj/cmake/build/_ts2 まで除外されるので具体的に書く
+EXCLUDE_PATTERNS       = */build/doxygen/* \
+                         */submodule/* \
+                         */arch/* \
+                         */_ts2/*/*_.h
+EXCLUDE_SYMBOLS        =
+
+USE_MDFILE_AS_MAINPAGE = docs/MENTAL_MODEL.md
+
+#---------------------------------------------------------------------------
+# Extraction
+#---------------------------------------------------------------------------
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_PRIV_VIRTUAL   = NO
+EXTRACT_PACKAGE        = NO
+EXTRACT_STATIC         = NO
+EXTRACT_LOCAL_CLASSES  = YES
+EXTRACT_LOCAL_METHODS  = NO
+
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+MULTILINE_CPP_IS_BRIEF = NO
+
+#---------------------------------------------------------------------------
+# Preprocessor — tscpp2 macros
+#---------------------------------------------------------------------------
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+SEARCH_INCLUDES        = YES
+INCLUDE_PATH           = src/h
+
+# tscpp2 / tinyState 関連マクロの展開ルール
+# - TS_STATE(NAME) は内部状態関数定義に展開される。Doxygen からは見せない方向
+# - TS_BEGIN_IMPLEMENT / TS_END_IMPLEMENT は #if 0 内なので preprocess 後に消える
+# - CLASS_TINYSTATE は実装定義マクロ。展開せず空にする
+# - thNEW は new wrapper。Doxygen には new に見せる
+# - sPtr<T> / sRptr<T,P> はそのまま
+PREDEFINED             = TS_STATE(x)= \
+                         TS_THREAD(x)= \
+                         TS_BEGIN_IMPLEMENT= \
+                         TS_END_IMPLEMENT= \
+                         TS_BEGIN_INTERFACE= \
+                         TS_END_INTERFACE= \
+                         CLASS_TINYSTATE(name,parent)= \
+                         TS_THISCLASS=ThisClass \
+                         TS_BASECLASS=BaseClass \
+                         "thNEW(cls,args)=new cls args" \
+                         thNULL=nullptr \
+                         "ifThis=(*this)" \
+                         "thThis=(*this)" \
+                         FORCEINLINE= \
+                         __EXTENSIONS__
+
+# #if 0 ブロック内は通常 Doxygen も読み飛ばす。
+# tscpp2 が読む宣言は別ファイル (foo_pb.h) に展開されるので、
+# 公開ヘッダ src/h/ 配下を読めば本質的に困らない方針。
+
+#---------------------------------------------------------------------------
+# HTML output
+#---------------------------------------------------------------------------
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+HTML_FILE_EXTENSION    = .html
+HTML_COLORSTYLE        = LIGHT
+HTML_DYNAMIC_MENUS     = YES
+HTML_DYNAMIC_SECTIONS  = NO
+
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+
+# doxygen-awesome-css 適用
+HTML_EXTRA_STYLESHEET  = submodule/doxygen-awesome-css/doxygen-awesome.css \
+                         submodule/doxygen-awesome-css/doxygen-awesome-sidebar-only.css \
+                         docs/custom.css
+HTML_COLORSTYLE_HUE    = 209
+HTML_COLORSTYLE_SAT    = 255
+HTML_COLORSTYLE_GAMMA  = 113
+
+#---------------------------------------------------------------------------
+# その他出力 — 全部 OFF
+#---------------------------------------------------------------------------
+GENERATE_LATEX         = NO
+GENERATE_MAN           = NO
+GENERATE_XML           = NO
+GENERATE_RTF           = NO
+GENERATE_DOCBOOK       = NO
+
+#---------------------------------------------------------------------------
+# Diagrams (graphviz)
+#---------------------------------------------------------------------------
+HAVE_DOT               = YES
+DOT_NUM_THREADS        = 0
+DOT_GRAPH_MAX_NODES    = 150
+MAX_DOT_GRAPH_DEPTH    = 0
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = YES
+GROUP_GRAPHS           = YES
+UML_LOOK               = NO
+TEMPLATE_RELATIONS     = NO
+INCLUDE_GRAPH          = YES
+INCLUDED_BY_GRAPH      = YES
+CALL_GRAPH             = NO
+CALLER_GRAPH           = NO
+GRAPHICAL_HIERARCHY    = YES
+DIRECTORY_GRAPH        = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+
+#---------------------------------------------------------------------------
+# Source browser
+#---------------------------------------------------------------------------
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+VERBATIM_HEADERS       = YES
+
+#---------------------------------------------------------------------------
+# Build options
+#---------------------------------------------------------------------------
+QUIET                  = NO
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+WARN_AS_ERROR          = NO
+WARN_LOGFILE           = build/doxygen/warnings.log
+
+#---------------------------------------------------------------------------
+# Search engine
+#---------------------------------------------------------------------------
+SEARCHENGINE           = YES
+SERVER_BASED_SEARCH    = NO

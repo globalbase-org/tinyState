@@ -1,0 +1,13 @@
+# gitcopy ../../arch/posix_Linux_Debian/src/h/std2 BEGIN
+mm_include.h
+# gitcopy ../../arch/posix_Linux_Debian/src/h/std2 END
+# gitcopy ../../arch/posix_Linux/src/h/std2 BEGIN
+m_include.h
+nt_m.h
+# gitcopy ../../arch/posix_Linux/src/h/std2 END
+# gitcopy ../../arch/posix/src/h/std2 BEGIN
+daemon.h
+includes.h
+nt.h
+stdOpenSSL.h
+# gitcopy ../../arch/posix/src/h/std2 END

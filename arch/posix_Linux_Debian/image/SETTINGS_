@@ -1,0 +1,20 @@
+### TRANSFER STAGE:0 MAIN:10
+PROG=$1
+PREFIX=$2
+ARCH=$3
+DIST=$4
+INST=$5
+
+MODE=g-w,o-w
+OWNER=root
+GROUP=root
+
+### TRANSFER STAGE:2
+apt-get install -y libudev-dev
+# cd archives/libusb/libusb-1.0.20
+# make install
+# cd ../../..
+# rm -rf  /lib/arm-linux-gnueabihf/libusb-1.0.so.0
+# ln -s /usr/local/lib/libusb-1.0.so.0.1.0 /lib/arm-linux-gnueabihf/libusb-1.0.so.0
+
+

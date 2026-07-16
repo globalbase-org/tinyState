@@ -1,0 +1,164 @@
+#!/usr/bin/perl
+use strict vars;
+use strict subs;
+use Data::Dumper;
+use Getopt::Long;
+
+my $baseDir = "src/scripts";
+
+GetOptions(
+    'base=s' => \$baseDir,
+    );
+
+my %contents;
+
+sub load_file
+{
+    my $filename = $_[0];
+    my $import_filelist = $_[1];
+    local(*IN);
+    $filename =~ s@^$baseDir/@@;
+    if ( !open(IN,"<$baseDir/$filename") ) {
+	die "can not open the file $filename << $import_filelist\n";
+    }
+    my $rp = $contents{$filename};
+    if ( $rp ) {
+	return $rp;
+    }
+    my $rp = {};
+    $contents{$filename} = $rp;
+    my @ret = ();
+    my @import_list = ();
+    while(<IN>) {
+	my $inp = $_;
+	$inp =~ s/[\n\r]//g;
+	push(@ret,$inp);
+    }
+    close(IN);
+    my $i;
+    for ( $i = 0 ; $i <= $#ret ; $i ++ ) {
+	my $inp = $ret[$i];
+	if ( $inp =~ m@^//\:IMPORT[ \t]+([^ \t]+)[ \t]*$@ ) {
+	    my $import_file = $1;
+	    push(@import_list,$import_file);
+	    load_file($import_file,$import_file." << ".$import_filelist);
+	}
+    }
+    $rp = {
+	import => \@import_list,
+	dependent => 0,
+	content => \@ret,
+	filename => $filename
+    };
+    $contents{$filename} = $rp;
+    return $rp;
+}
+
+sub clear_loop
+{
+    foreach ( keys %contents ) {
+	my $file = $_;
+	my $rp = $contents{$file};
+	$rp->{loop} = 0;
+    }
+}
+
+sub start_check_loop
+{
+    my $file = $_[0];
+    my $top = $_[1];
+    my $rp = $contents{$file};
+    if ( $rp->{loop} == 1 ) {
+	return 0;
+    }
+    $rp->{loop} = 1;
+    foreach ( @{$rp->{"import"}} ) {
+	my $n = $_;
+	if ( $n eq $top ) {
+	    print STDERR "\t$n\n";
+	    return 1;
+	}
+	if ( start_check_loop($n,$top) ) {
+	    print STDERR "\t$n\n";
+	    return 1;
+	}
+    }
+    return 0;
+}
+
+sub search_loop
+{
+    my $nos = $_[0];
+    foreach ( keys %contents ) {
+	my $file = $_;
+	my $entry = $contents{$file};
+	if ( $file->{dependent} < 2*$nos ) {
+	    next;
+	}
+	clear_loop();
+	if ( start_check_loop($file,$file) ) {
+	    die "";
+	}
+    }
+}
+
+sub set_dependency
+{
+    my $top = $_[0];
+    my $name = $_[1];
+    my $nos = keys %contents;
+    foreach ( @{$top->{"import"}} ) {
+	my $inp = $_;
+	my $rp = $contents{$inp};
+	if ( $rp->{dependent} <= $top->{dependent} ) {
+	    $rp->{dependent} = $top->{dependent} + 1;
+	    if ( $rp->{dependent} >= 3*$nos ) {
+		print STDERR "Reference Loop is detected\n";
+		search_loop();
+	    }
+	    set_dependency($rp,$inp);
+	}
+    }
+}
+
+sub make_output
+{
+    my @output;
+    my @ret;
+    set_dependency(load_file($_[0]),$_[0]);
+    foreach ( keys %contents ) {
+	my $kk = $_;
+	push(@output,$contents{$kk});
+    }
+    @output = sort {
+	my $aa = $a;
+	my $bb = $b;
+	return $bb->{dependent} <=> $aa->{dependent};
+    } @output;
+    foreach ( @output ) {
+	my $inp = $_;
+	push(@ret,"// FILENAME = ".$inp->{filename});
+	push(@ret,@{$inp->{content}});
+    }
+    return @ret;
+}
+
+
+sub jslink
+{
+    my $filename = $_[0];
+    my $outputfilename = $_[1];
+    my @ret = make_output($filename);
+    if ( !open(OUT,">$outputfilename") ) {
+	die "cannot open the file $outputfilename";
+    }
+    foreach ( @ret ) {
+	print OUT $_."\n";
+    }
+    close(OUT);
+}
+
+
+
+jslink($ARGV[0],$ARGV[1]);
+

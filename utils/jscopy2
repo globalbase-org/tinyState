@@ -1,0 +1,95 @@
+#!/usr/bin/perl
+use strict vars;
+use strict subs;
+use Data::Dumper;
+use Getopt::Long;
+
+sub fileCopy
+{
+    my $inpBase = $_[0];
+    my $file = $_[1];
+    my $outBase = $_[2];
+
+    print "(COPY $inpBase $file $outBase)\n";
+
+    open(IN,"<$inpBase/$file") || die "cannot open the file $inpBase/$file\n";
+    open(OUT,">$outBase/$file") || die "cannot open the file $outBase/$file\n";
+
+    my @splitFile = split(/\//,$file);
+    while(<IN>) {
+	my $line = $_;
+	if ( $line =~ m/\/\/\:IMPORT[ \t]+([^\n\r]+)/ ) {
+	    my $importFile = $1;
+	    my @splitImport = split(/\//,$importFile);
+	    my @sp = @splitFile;
+	    for ( ; $#splitImport > 0 && $#sp > 0 &&
+		  $splitImport[0] eq $sp[0] ; ) {
+		shift(@splitImport);
+		shift(@sp);
+	    }
+	    my $newFile = "";
+	    for ( my $i = $#sp ; $i > 0 ; $i -- ) {
+		$newFile .= "../";
+	    }
+	    if ( $newFile eq "" ) {
+		$newFile = "./".join("/",@splitImport);
+	    }
+	    else {
+		$newFile .= join("/",@splitImport);
+	    }
+	    my $className = $splitImport[$#splitImport];
+	    $className =~ s/\.[^.]+$//;
+	    print OUT "import { ".$className." } from '".$newFile."';\n";
+	}
+	else {
+	    print OUT $line;
+	}
+    }
+    my $className = $splitFile[$#splitFile];
+    $className =~ s/\.[^.]+$//;
+    print OUT "export { ".$className." }\n\n";
+    close(IN);
+    close(OUT);
+}
+
+sub dirCopy
+{
+    my $inpBase = $_[0];
+    my $outBase = $_[1];
+    my $inp = $_[2];
+    my $out = $_[3];
+    system("mkdir -p $out");
+    open(IN,"ls -1 $inp|");
+    my @list;
+    while(<IN>) {
+	my $line = $_;
+	$line =~ s/[\n\r]//g;
+	if ( $line eq ".") {
+	    next;
+	}
+	if ( $line eq "..") {
+	    next;
+	}
+	push(@list,$line);
+    }
+    close(IN);
+    foreach ( @list ) {
+	my $line = $_;
+	if ( -d $inp."/".$line ) {
+	    dirCopy($inpBase,$outBase,"$inp/$line","$out/$line");
+	}
+	elsif ( $line =~ m/\.js$/ ) {
+	    fileCopy($inpBase,substr($inp,length($inpBase)+1)."/".$line,$outBase);
+	}
+	else {
+	    system("cp -rfp $inp/$line $out/$line");
+	}
+    }
+}
+
+if ( $ARGV[0] eq "-d" ) {
+    dirCopy($ARGV[1],$ARGV[2],$ARGV[1],$ARGV[2]);
+}
+else {
+    fileCopy($ARGV[1],$ARGV[2],$ARGV[3]);
+}

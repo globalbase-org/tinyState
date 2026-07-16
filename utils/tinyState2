@@ -1,0 +1,802 @@
+#!/usr/bin/perl
+
+use strict vars;
+use strict subs;
+
+use DB_File;
+use Fcntl;
+use Carp;
+use FindBin;
+use Getopt::Long;
+
+my $opt_header = "";
+
+GetOptions(
+    'header=s' => \$opt_header,
+        );
+
+my $cmd = $ARGV[0];
+my $database = $ARGV[1];
+my $filename = $ARGV[2];
+
+
+# DATABASE
+#
+# num_free
+# num_last.
+# num_state.
+# state_num.
+# class_path.
+# stateClass.
+# classState.
+
+my (%dbhash,$dbobj);
+my $opened_file;
+my $closed_file;
+my $public_file;
+
+sub set_filename
+{
+    my $trunc;
+    if ( $opt_header eq "" ) {
+	$filename =~ m/^(.*)\.c$/;
+	$trunc = $1;
+    }
+    else {
+	if ( $filename =~ m/\// ) {
+	    $filename =~ m/\/([^\/]*)\.c$/;
+	    $trunc = $opt_header."/".$1;
+	}
+	else {
+	    $filename =~ m/^(.*)\.c$/;
+	    $trunc = $opt_header."/".$1;
+	}
+    }
+    $opened_file = $trunc."_op.h";
+    $closed_file = $trunc."_cs.h";
+    $public_file = $trunc."_pb.h";
+}
+
+sub delete_num
+{
+    my $st = $_[0];
+    my $num = $dbhash{"state_num.".$st};
+    if ( !(defined $num) ) {
+	return;
+    }
+    my $nkey = sprintf("%010u",$num);
+    delete $dbhash{"state_num.".$st};
+    delete $dbhash{"num_state.".$nkey};
+    $dbhash{"num_free.".$nkey} = 1;
+}
+
+sub new_num
+{
+    my $stt = $_[0];
+    my $num = $dbhash{"state_num.".$stt};
+    if ( defined $num ) {
+	return $num;
+    }
+    my $keyorg = "num_free.";
+    my $klen = length($keyorg);
+    my ($key,$value) = ($keyorg,"");
+    my $st = $dbobj->seq($key,$value,R_CURSOR);
+    my $nfree = 1;
+    if ( $st != 0 || substr($key,0,$klen) ne $keyorg ) {
+	$nfree = $dbhash{"num_last"};
+	if ( !(defined $nfree) ) {
+	    $dbhash{"num_last"} = 2;
+	    $nfree = 1;
+	}
+	else {
+	    $dbhash{"num_last"} = $nfree + 1;
+	}
+    }
+    else {
+	$key =~ m/^num_free\.([0-9]+)$/;
+	
+	$nfree = $1;
+	if ( $nfree == 0 ) {
+	    $nfree = 0;
+	}
+	else {
+	    $nfree =~ s/^0+//;
+	}
+	delete $dbhash{$key};
+    }
+    $dbhash{"num_state.".sprintf("%010u",$nfree)} = $stt;
+    $dbhash{"state_num.".$stt} = $nfree;
+    return $nfree;
+}
+
+sub new_class_num
+{
+    my $cls = $_[0];
+    my $stt = $_[1];
+    my $num = new_num($stt);
+    $dbhash{"stateClass.".$stt."+".$cls} = 1;
+    $dbhash{"classState.".$cls."+".$stt} = 1;
+    return $num;
+}
+
+
+sub delete_state
+{
+    my $cls = $_[0];
+    my $stt = $_[1];
+    delete $dbhash{"classState.".$cls."+".$stt};
+    delete $dbhash{"stateClass.".$stt."+".$cls};
+    my $keyorg = "stateClass.".$stt."+";
+    my $klen = length($keyorg);
+    my ($key,$value) = ($keyorg,"");
+    my $st = $dbobj->seq($key,$value,R_CURSOR);
+    if ( $st != 0 || substr($key,0,$klen) eq $keyorg ) {
+	return;
+    }
+    delete_num($stt);
+}
+
+
+sub clean_database
+{
+    my @args = @_;
+    my $class_name = shift(@args);
+    my @states = ();
+    my %st_hash = ();
+    foreach ( @args ) {
+	my $stt = $_;
+	$st_hash{$stt} = 1;
+    }
+
+    my $keyorg = "classState.".$class_name."+";
+    my $klen = length($keyorg);
+    my ($key,$value) = ($keyorg,"");
+    my $st = $dbobj->seq($key,$value,R_CURSOR);
+    for ( ; $st == 0 ; ) {
+	if ( substr($key,0,$klen) ne $keyorg ) {
+	    last;
+	}
+	$key =~ m/^classState\.([0-9a-zA-Z_]+)\+([0-9a-zA-Z_]+)/;
+	my $cls = $1;
+	my $stt = $2;
+        if ( defined $st_hash{$stt} ) {
+        }
+        else {
+	    push(@states,$stt);
+        }
+        $st = $dbobj->seq($key,$value,R_NEXT);
+    }
+    foreach ( @states ) {
+	my $st = $_;
+	delete_state($class_name,$st);
+    }
+}
+
+sub swap_tmp
+{
+    my $target = $_[0];
+    local(*IN);
+    if ( !(-e $target) ) {
+	system("mv $target.tmp $target");
+	return;
+    }
+    open(IN,"diff $target $target.tmp|");
+    my $diff_flag = 0;
+    while(<IN>) {
+	my $line = $_;
+	$diff_flag = 1;
+    }
+    close(IN);
+    if ( $diff_flag ) {
+	system("mv $target.tmp $target");
+	return;
+    }
+    else {
+	system("rm $target.tmp");
+    }
+    return;
+}
+
+
+sub relative_path
+{
+    my $path = $_[0];
+    if ( $opt_header ne "" ) {
+	if ( $path =~ m/\// ) {
+	    $path =~ m/\/([^\/]*)$/;
+	    $path = $1;
+	    return $path;
+	}
+	else {
+	    return $path;
+	}
+    }
+    my $dir = "";
+    my $fff = $filename;
+    for ( ; $fff =~ m/^([^\/]+\/)/ ; ) {
+	my $dd = $1;
+	if ( substr($filename,0,length($dir.$dd))
+	     ne substr($path,0,length($dir.$dd)) ) {
+	    last;
+	}
+	$dir = $dir.$dd;
+        $fff = substr($fff,length($dir));
+    }
+    my $ff = substr($filename,length($dir));
+    my $path = substr($path,length($dir));
+    my $dd = $path;
+    $dd =~ s/[^\/]//g;
+    my $dd_nos = length($dd);
+    my $i = 0;
+    for ( ; $i < $dd_nos ; $i ++ ) {
+	$path = "../".$path;
+    }
+    return $path;
+}
+
+
+sub scan_file
+{
+    my @new_states = ();
+    my %states = ();
+    my @states_num = ();
+    my $class_name;
+    my $baseclass_name;
+    local(*IN);
+    if (!open(IN,"<$filename")) {
+	die "cannot open the file $filename";
+    }
+    my @typedef_lines = ();
+    my @typedef_public = ();
+    my $mode = 0;
+print "SCANFILE\n";
+    while(<IN>) {
+	my $line = $_;
+	$line =~ s/[\n\r]//g;
+	if ( $line =~ m/^TS_NEW_CLASS\(([a-zA-Z0-9_]*),([a-zA-Z0-9_]*)\)/ ) {
+	    if ( defined $class_name ) {
+		die "duplicated TS_NEW_CLASS in one file $filename";
+	    }
+	    $class_name = $1;
+	    $baseclass_name = $2;
+	    $mode = 1;
+	}
+	elsif ( $line =~ m/^TS_NEW_CLASS_END/ ) {
+	    $mode = 0;
+	}
+	elsif ( $line =~ m/^TS_STATE\(([a-zA-Z0-9_]*)\)/ ) {
+	    my $state_name = $1;
+	    push(@new_states,$state_name);
+	}
+	elsif ( $line =~ m/^TS_PUBLIC\(([a-zA-Z0-9_]*)\)/ ) {
+	    my $state_name = $1;
+	    push(@new_states,"public_".$state_name);
+	}
+	elsif ( $mode == 1 && $line =~ m/typedef[ \t]+struct[ \t]+___ts_private/ ) {
+	    $mode = 2;
+	}
+        elsif ( $mode == 2 && $line =~ m/___TS_PRIVATE/ ) {
+            $mode = 1;
+        }
+        elsif ( $mode == 1 && $line =~ m/typedef[ \t]+struct[ \t]+___ts_public/ ) {
+            $mode = 3;
+        }
+        elsif ( $mode == 3 && $line =~ m/___TS_PUBLIC/ ) {
+            $mode = 1;
+        }
+        elsif ( $mode == 2 ) {
+        	push(@typedef_lines,$line);
+        }
+        elsif ( $mode == 3 ) {
+        	push(@typedef_public,$line);
+        }
+	else {
+	}
+    }
+    close(IN);
+#    if ( $#typedef_lines < 1 ) {
+#	exit(0);
+#    }
+    if ( !(defined $class_name) || $class_name eq "" ) {
+	exit(0);
+    }
+
+    $dbobj = tie(%dbhash,'DB_File',$database,O_RDWR|O_CREAT,0644,$DB_BTREE);
+
+    $dbhash{"FILE.".$filename} = 1;
+    $dbhash{"HEADER"} = $opt_header;
+
+    my $class_path = $dbhash{"class.".$class_name};
+    if ( defined $class_path ) {
+	if ( $class_path ne $filename ) {
+	    return "duplicate class definition $class_name / $class_path and $filename";
+	}
+    }
+    else {
+	$dbhash{"class.".$class_name} = $filename;
+    }
+    my @states = ();
+    my $slen = int(($#new_states+1) * 1.5);
+    clean_database($class_name,@new_states);
+    foreach ( @new_states ) {
+	my $stt = $_;
+	my $num = new_class_num($class_name,$stt);
+	my $hnum = $num % ($slen+1);
+	if ( defined $states[$hnum] ) {
+	    $states[$hnum] .= "+".$num.":".$stt;
+	}
+	else {
+	    $states[$hnum] = "_+".$num.":".$stt;
+	}
+    }
+    my $target = 0;
+    for ( my $i = 0 ; $i <= $#states ; $i ++ ) {
+	my $value = $states[$i];
+	if ( !(defined $value) ) {
+	    next;
+	}
+	for ( ; $value =~ m/^([0-9_]+\+[^\+]+)(\+.*)$/ ; ) {
+	    my $top = $1;
+	    my $trail = $2;
+	    for ( ; defined $states[$target] ; $target ++ ) {}
+	    $states[$target] = $top;
+	    $value = $target.$trail;
+	    $states[$i] = $value;
+	}
+    }
+    if ( !(defined $class_name) ) {
+	return;
+    }
+    set_filename();
+    print STDERR "CLASS $class_name -- $baseclass_name >> $opened_file $closed_file\n";
+    my $base_class_ptr;
+    if ( $baseclass_name eq "" ) {
+	$base_class_ptr = "0";
+    }
+    else {
+	$base_class_ptr = "&class_".$baseclass_name;
+    }
+
+    local(*OUT);
+    open(OUT,">$closed_file.tmp");
+    print OUT
+'#ifndef ___CLASS_CS_'.$class_name.'
+#define ___CLASS_CS_'.$class_name.'
+
+#include "tinyState.h"
+';
+    if ( $baseclass_name ne "" ) {
+	my $path =  $dbhash{"class.".$baseclass_name};
+	if ( !(defined $path) ) {
+	    $path = $baseclass_name.'_op.h';
+	}
+	else {
+	    $path =~ s/\.c$/_op.h/;
+	}
+	$path = relative_path($path);
+	print OUT
+'#include "'.$path.'"
+';
+    }
+    my $path = $filename;
+    $path =~ s/\.c$/_op.h/;
+    $path = relative_path($path);
+
+    print OUT
+'#include "'.$path.'"
+';
+
+    print OUT "\n";
+
+    for ( my $i = 0 ; $i <= $slen ; $i ++ ) {
+	my $value = $states[$i];
+	if ( defined $value ) {
+	    $value =~ m/^([0-9_]+)\+([0-9]+)\:(.*)$/;
+	    my $nxt = $1;
+	    my $num = $2;
+	    my $stt = $3;
+	    if ( $stt =~ m/^public_/ ) {
+		print OUT 'static INTPTR '.$stt.'();'."\n";
+	    }
+	    else {
+		print OUT 'static INTPTR state_'.$stt.'();'."\n";
+	    }
+	}
+    }
+    print OUT "\n\n";
+
+    print OUT
+	'static TS_STATE_ELEMENT stateTbl_'.$class_name.'[] = {
+';
+    for ( my $i = 0 ; $i <= $slen ; $i ++ ) {
+	my $value = $states[$i];
+	if ( defined $value ) {
+	    $value =~ m/^([0-9_]+)\+([0-9]+)\:(.*)$/;
+	    my $nxt = $1;
+	    my $num = $2;
+	    my $stt = $3;
+	    if ( $nxt eq "_" ) {
+		if ( $stt =~ m/^public_/ ) {
+		    $stt =~ s/^public_//;
+		    print OUT "\t".'{public_'.$stt.',PUB_'.$stt.',0}';
+		}
+		else {
+		    print OUT "\t".'{state_'.$stt.','.$stt.',0}';
+		}
+	    }
+	    else {
+		if ( $stt =~ m/^public_/ ) {
+		    $stt =~ s/^public_//;
+		    print OUT "\t".'{public_'.$stt.',PUB_'.$stt.',&stateTbl_'.$class_name.'['.$nxt.']}';
+		}
+		else {
+		    print OUT "\t".'{state_'.$stt.','.$stt.',&stateTbl_'.$class_name.'['.$nxt.']}';
+		}
+	    }
+	}
+	else {
+	    print OUT "\t".'{0,0}'
+	}
+	if ( $i != $slen ) {
+	    print OUT ','."\n";
+	}
+	else {
+	    print OUT "\n";
+	}
+    }
+    print OUT '};';
+    print OUT "\n\n";
+    print OUT
+'TS_CLASS class_'.$class_name.' = {
+       "'.$class_name.'",
+       '.$base_class_ptr.',
+       &stateTbl_'.$class_name.'[0],
+       '.($slen+1).'
+};
+
+
+#endif
+';
+    close(OUT);
+
+    swap_tmp($closed_file);
+
+    open(OUT,">$opened_file.tmp");
+
+    print OUT
+'
+#ifndef ___CLASS_OP_'.$class_name.'
+#define ___CLASS_OP_'.$class_name.'
+
+#include "tinyState.h"
+';
+    if ( $baseclass_name ne "" ) {
+	my $path =  $dbhash{"class.".$baseclass_name};
+	if ( !(defined $path) ) {
+	    $path = $baseclass_name.'_op.h';
+	}
+	else {
+	    $path =~ s/\.c$/_op.h/;
+	}
+	$path = relative_path($path);
+	print OUT
+'#include "'.$path.'"
+';
+    }
+    my $path = $filename;
+    $path =~ s/\.c$/_op.h/;
+    $path = relative_path($path);
+
+    print OUT
+'
+extern TS_CLASS class_'.$class_name.';
+
+';
+
+
+    for ( my $i = 0 ; $i <= $slen ; $i ++ ) {
+	my $value = $states[$i];
+	if ( defined $value ) {
+	    $value =~ m/^([0-9_]+)\+([0-9]+)\:(.*)$/;
+	    my $nxt = $1;
+	    my $num = $2;
+	    my $stt = $3;
+	    my $cat = "NON";
+	    if ( $stt =~ m/^public_/ ) {
+		next;
+	    }
+	    elsif ( $stt =~ m/^([A-Z]+)\_/ ) {
+		$cat = $1;
+	    }
+	    print OUT 
+'#ifndef '.$stt.'
+#define '.$stt."\t(".$num.'|C_'.$cat.')
+#endif
+';
+	}
+    }
+    print OUT "\n\n";
+
+
+    print OUT '
+#ifdef ___TS_OBJECT_TYPEDEF
+#undef ___TS_OBJECT_TYPEDEF
+#endif
+';
+    if ( $baseclass_name eq "" ) {
+	print OUT '#define _TS_OBJECT_'.$class_name.' '."\\\n".join("\\\n",@typedef_lines)."\n";
+    }
+    else {
+	print OUT '#define _TS_OBJECT_'.$class_name.' '."\\\n\t".'_TS_OBJECT_'.$baseclass_name.
+	    ';'."\\\n".join("\\\n",@typedef_lines)."\n";
+    }
+    print OUT 
+'#define ___TS_OBJECT_TYPEDEF typedef struct ts_current_object { _TS_OBJECT_'.$class_name.' } TS_CURRENT_OBJECT; \
+typedef struct ts_object_'.$class_name.' { _TS_OBJECT_'.$class_name.' } TS_OBJECT_'.$class_name.';
+
+#ifdef TS_CURRENT_CLASS
+#undef TS_CURRENT_CLASS
+#endif
+#define TS_CURRENT_CLASS class_'.$class_name.'
+
+#ifdef TS_CURRENT_PUBLIC
+#undef TS_CURRENT_PUBLIC
+#endif
+#define TS_CURRENT_PUBLIC '.$class_name.'_PUB
+';
+    print OUT "\n\n";
+
+    print OUT '
+#endif
+';
+    close(OUT);
+
+    swap_tmp($opened_file);
+
+
+
+    open(OUT,">$public_file.tmp");
+
+    print OUT
+'
+#ifndef ___CLASS_PB_'.$class_name.'
+#define ___CLASS_PB_'.$class_name.'
+
+#include "tinyState.h"
+
+';
+
+
+    for ( my $i = 0 ; $i <= $slen ; $i ++ ) {
+	my $value = $states[$i];
+	if ( defined $value ) {
+	    $value =~ m/^([0-9_]+)\+([0-9]+)\:(.*)$/;
+	    my $nxt = $1;
+	    my $num = $2;
+	    my $stt = $3;
+	    my $cat = "NON";
+	    if ( $stt =~ m/^public_/ ) {
+		$stt =~ s/^public_/PUB_/;
+	    }
+	    else {
+		next;
+	    }
+	    print OUT 
+'#ifndef '.$stt.'
+#define '.$stt."\t(".$num.'|C_PUB)
+#endif
+';
+	}
+    }
+    print OUT "\n\n";
+
+    print OUT '
+';
+    if ( $baseclass_name eq "" ) {
+	print OUT '#define _TS_OBJECT_PUB_'.$class_name.' '."\\\n".join("\\\n",@typedef_public)."\n";
+    }
+    else {
+	print OUT '#define _TS_OBJECT_PUB_'.$class_name.' '."\\\n\t".'_TS_OBJECT_PUB_'.$baseclass_name.
+	    ';'."\\\n".join("\\\n",@typedef_public)."\n";
+    }
+    print OUT 'typedef struct '.$class_name.'_pub { _TS_OBJECT_PUB_'.$class_name.' } '.$class_name.'_PUB;
+
+
+extern TS_CLASS class_'.$class_name.';
+
+';
+    print OUT "\n\n";
+
+
+    print OUT '
+#endif
+';
+    close(OUT);
+
+    swap_tmp($public_file);
+
+    return "";
+}
+
+
+sub dump_db
+{
+    $dbobj = tie(%dbhash,'DB_File',$database,O_RDONLY,0644,$DB_BTREE);
+    foreach ( keys %dbhash ) {
+	my $k = $_;
+	print "DUMP $k ==> ".$dbhash{$k}."\n";
+    }
+}
+
+sub clean_path
+{
+    $dbobj = tie(%dbhash,'DB_File',$database,O_RDWR|O_CREAT,0644,$DB_BTREE);
+    my $keyorg = "class.";
+    my $klen = length($keyorg);
+    my ($key,$value) = ($keyorg,"");
+    my $st = $dbobj->seq($key,$value,R_CURSOR);
+    my @cls = ();
+    for ( ; $st == 0 ; ) {
+	if ( substr($key,0,$klen) ne $keyorg ) {
+	    last;
+	}
+	if ( !(-e $value) ) {
+	    push(@cls,$key);
+	}
+	$st = $dbobj->seq($key,$value,R_NEXT);
+    }
+    foreach ( @cls ) {
+	my $p = $_;
+	$p =~ s/^class\.//;
+	print STDERR "CLEAN $p\n";
+	clean_database($p);
+	delete $dbhash{"class.".$p};
+    }
+}
+
+sub output_tables
+{
+    $dbobj = tie(%dbhash,'DB_File',$database,O_RDWR|O_CREAT,0644,$DB_BTREE);
+    if ( !$dbobj ) {
+	die "invalid database $database\n";
+    }
+    if ( !(defined $filename) || $filename eq "" ) {
+	die "filename is required\n";
+    }
+
+    my @dd = ();
+    my $keyorg = "num_state.";
+    my $klen = length($keyorg);
+    my ($key,$value) = ($keyorg,"");
+    my $st = $dbobj->seq($key,$value,R_CURSOR);
+    for ( ; $st == 0 ; ) {
+	if ( !($key =~ m/^num_state\./) ) {
+	    last;
+	}
+	$key =~ m/([1-9][0-9]*)$/;
+	my $num = $1;
+	my $vv = $value;
+	$vv =~ s/^public_/PUB_/;
+	$dd[$num] = $vv;
+	$st = $dbobj->seq($key,$value,R_NEXT);
+    }
+    my $i;
+
+    local(*OUT);
+    open(OUT,">$filename.tmp");
+    print OUT '
+#ifndef ___TS_TABLE_H___
+#define ___TS_TABLE_H___
+
+#include "tinyState.h"
+
+TS_MACRO_TABLE ts_macro_tbl[] = {
+';
+
+    for ( $i = 0 ; $i <= $#dd ; $i ++ ) {
+	my $d = $dd[$i];
+	if ( defined $dd[$i] ) {
+	    $d =~ m/^([A-Z]+)\_/;
+	    my $head = $1;
+	    print OUT "\t{".$i."|C_$head,\"$d\"}";
+	}
+	else {
+	    print OUT "\t{0,\"\"}";
+	}
+	if ( $i != $#dd ) {
+	    print OUT ",\n";
+	}
+	else {
+	    print OUT "\n";
+	}
+    }
+
+    print OUT '
+};
+
+#endif
+
+';
+    close(OUT);
+
+    swap_tmp($filename);
+
+}
+
+
+sub all_scan
+{
+    $dbobj = tie(%dbhash,'DB_File',$database,O_RDWR|O_CREAT,0644,$DB_BTREE);
+    $opt_header = $dbhash{"HEADER"};
+    my $key = "FILE.";
+    my $value = "";
+    my $st = $dbobj->seq($key,$value,R_CURSOR);
+    my @target;
+    for ( ; $st == 0 ; ) {
+	if ( !($key =~ m/^FILE\.(.*)$/) ) {
+	    last;
+	}
+	my $file = $1;
+	push(@target,$file);
+	$st = $dbobj->seq($key,$value,R_NEXT);
+    }
+    foreach ( @target ) {
+	$filename = $_;
+	if ( !(-e $filename) ) {
+	    delete $dbhash{"FILE.".$filename};
+	    next;
+	}
+	print STDERR "SCAN $filename\n";
+#	next;
+	my $ret;
+	eval {
+	    $ret = scan_file();
+	};
+	if ( $@ ) {
+	    print STDERR "SCAN ERROR $@\n";
+	    die "SCAN ERROR\n";
+	}
+	if ( $ret ne "" ) {
+	    clean_path();
+	    $ret = scan_file();
+	    if ( $ret ne "" ) {
+		die $ret;
+	    }
+	}
+	
+    }
+
+    
+}
+
+
+if ( $cmd eq "file" ) {
+    my $ret;
+    eval {
+	$ret = scan_file();
+    };
+    if ( $@ ) {
+	print STDERR "SCAN ERROR $@\n";
+	die "SCAN ERROR\n";
+    }
+    if ( $ret ne "" ) {
+	clean_path();
+	$ret = scan_file();
+	if ( $ret ne "" ) {
+	    die $ret;
+	}
+    }
+}
+elsif ( $cmd eq "dump" ) {
+    dump_db();
+}
+elsif ( $cmd eq "table" ) {
+    output_tables();
+}
+elsif ( $cmd eq "all" ) {
+    all_scan();
+}
+else {
+    die "invalid command $cmd\n";
+}
+exit(0);

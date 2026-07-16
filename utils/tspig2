@@ -1,0 +1,628 @@
+#!/usr/bin/perl
+use Data::Dumper;
+use Getopt::Long;
+use MIME::Base64 qw/encode_base64 decode_base64/;
+
+my @thu_copy = (".png",".jpg",".gif",".js",".cgi",".css");
+my @dont_remove = ("webdocs/scripts");
+
+my $base_orgdir = $ARGV[0];
+my $base_targetdir = $ARGV[1];
+my $pig_code = 1;
+
+my @basePath;
+my %html;
+
+GetOptions(
+    'include=s' => \$opt_include,
+    'replace=s' => \$replace_list,
+    );
+
+print "REPLACE LIST ".$replace_list."\n";
+
+@basePath = split(/,/,$opt_include);
+@replaceList = split(/,/,$replace_list);
+%replaceHash = ();
+
+foreach ( @replaceList ) {
+    my $one = $_;
+    if ( $one =~ m/^\/(.*)=(.*)\/$/ ) {
+	my $key = $1;
+	my $data = $2;
+	print "REPLACE $key --> $data\n";
+	$replaceHash{$key} = $data;
+    }
+}
+
+sub replace_value
+{
+    my $inp = $_[0];
+    my @sp = split(/(\$\{[a-zA-Z0-9_]+\})/,$inp);
+    my $i = 0;
+    for ( ; $i <= $#sp ; $i ++ ) {
+	my $ss = $sp[$i];
+	if ( $ss =~ m/\$\{([a-zA-Z0-9_]+)\}/ ) {
+	    my $k = $1;
+	    my $v = $replaceHash{$k};
+	    if ( $v ) {
+		$sp[$i] = $v;
+	    }
+	}
+    }
+    return join("",@sp);
+}
+
+sub get_htmlpath
+{
+    my $inp = $_[0];
+    foreach ( @basePath ) {
+	my $bp = $_;
+	my $path = $bp."/".$inp;
+	if ( $html{$path} ) {
+	    return $path;
+	}
+    }
+}
+
+sub mkdir_file
+{
+    my $dir = $_[0];
+    print STDERR "mkdir -p $dir\n";
+    system("mkdir -p $dir");
+}
+
+sub copy_file
+{
+    my $from = $_[0];
+    my $to = $_[1];
+    print STDERR "cp $from $to\n";
+    system("cp $from $to");
+    system("chmod u+w $to");
+}
+
+sub remove_file
+{
+    my $file = $_[0];
+    print STDERR "rm -rf $file\n";
+    system("rm -rf $file");
+}
+
+sub scan_files
+{
+    my $orgdir = $_[0];
+    my $targetdir = $_[1];
+
+    mkdir_file($targetdir);
+
+    my @open_list = ();
+    open(IN,"ls -1a $orgdir|");
+    while(<IN>) {
+	my $inp = $_;
+	$inp =~ s/[\n\r]//g;
+	if ( $inp eq ".htaccess" ) {
+	    push(@open_list,$inp);
+	    next;
+	}
+	if ( $inp =~ m/^\./ ) {
+	    next;
+	}
+	push(@open_list,$inp);
+    }
+    close(IN);
+
+    foreach ( @open_list ) {
+	my $inp = $_;
+	if ( -d $orgdir."/".$inp ) {
+	    my $tar = $targetdir."/".$inp;
+	    if ( !(-e $tar) || (-d $tar) ) {
+		scan_files($orgdir."/".$inp,$tar);
+	    }
+	    else {
+		remove_file($tar);
+		scan_files($orgdir."/".$inp,$tar);
+	    }
+	    next;
+	}
+	my $hit = 0;
+	foreach ( @thu_copy ) {
+	    my $postfix = $_;
+	    $postfix = "\\".$postfix;
+	    if ( !($inp =~ m/$postfix$/) ) {
+		next;
+	    }
+	    $hit = 1;
+	    my $tar = $targetdir."/".$inp;
+	    if ( !(-e $tar) ) {
+		copy_file("$orgdir/$inp","$tar");
+		last;
+	    }
+	    if ( -d $tar ) {
+		remove_file($tar);
+		copy_file("$orgdir/$inp","$tar");
+		last;
+	    }
+	    my @orgst = stat("$orgdir/$inp");
+	    my $targetst = stat("$tar");
+	    if ( $orgst[9] > $targetst[9] ) {
+		copy_file("$orgdir/$inp","$tar");
+		last;
+	    }
+	    last;
+	}
+	if ( $hit == 1 ) {
+	    next;
+	}
+	if ( $inp eq ".htaccess" ) {
+	    copy_file("$orgdir/$inp","$targetdir/$inp");
+	    next;
+	}
+	if ( $inp =~ m/\.html$/ || $inp =~ m/\.htm$/ )  {
+	    $html{"$orgdir/$inp"} = {
+		"org" => $orgdir,
+		"target" => $targetdir,
+		"file" => $inp,
+		"code" => $pig_code
+	    };
+	    $pig_code ++;
+	}
+    }
+}
+
+sub reverse_scan_files
+{
+    my $orgdir = $_[0];
+    my $targetdir = $_[1];
+    my @dellist = ();
+
+    my @open_list = ();
+    open(IN,"ls -1a $targetdir|");
+    while(<IN>) {
+	my $inp = $_;
+	$inp =~ s/[\n\r]//g;
+	if ( $inp eq ".htaccess" ) {
+	    push(@open_list,$inp);
+	    next;
+	}
+	if ( $inp =~ m/^\./ ) {
+	    next;
+	}
+	push(@open_list,$inp);
+    }
+    close(IN);
+    foreach ( @open_list ) {
+	my $inp = $_;
+	if ( !(-e $orgdir."/".$inp) ) {
+	    push(@dellist,$targetdir."/".$inp);
+	    next;
+	}
+	if ( -d $targetdir."/".$inp ) {
+	    reverse_scan_files($orgdir."/".$inp,$targetdir."/".$inp);
+	    next;
+	}
+    }
+    foreach ( @dellist ) {
+	my $d = $_;
+	my $hit = 0;
+	foreach ( @dont_remove ) {
+	    my $path = $_;
+	    my $len = length($path);
+	    if ( substr($d,0,$len) eq $path ) {
+		$hit = 1;
+		last;
+	    }
+	}
+	if ( $hit ) {
+	    next;
+	}
+	remove_file($d);
+    }
+}
+
+
+sub target_filepath
+{
+    my $access_file = $_[0];
+    my $target_file = $_[1];
+    if ( $target_file =~ m/^\// ) {
+	$target_file = $base_orgdir.$target_file;
+    }
+    else {
+	if ( !($access_file =~ s/\/[^\/]+$//) ) {
+	    $access_file = "";
+	}
+	for ( ; ; ) {
+	    if ( !$access_file ) {
+		last;
+	    }
+	    if ( $target_file =~ s/^\.\.\/// ) {
+		if ( $access_file =~ s/\[^\/]+$// ) {
+		}
+		else {
+		    $access_file = "";
+		}
+	    }
+	    elsif ( $target_file =~ s/^\.\/// ) {
+	    }
+	    else {
+		last;
+	    }
+	}
+	if ( $access_file ) {
+	    $target_file = $access_file."/".$target_file;
+	}
+    }
+    return $target_file;
+}
+
+sub load_script
+{
+    my $access_file = $_[0];
+    my $target_file = $_[1];
+    $target_file = target_filepath($access_file,$target_file);
+    my $data = "";
+    open(IN,"<$target_file") or die "cannot open the file $target_file\n";
+    while(<IN>) {
+	my $inp = $_;
+	$inp =~ s/[\n\r]//g;
+	$data .= $inp ."++++CR++++";
+    }
+    close(IN);
+    return $data;
+}
+
+sub load_image
+{
+    my $access_file = $_[0];
+    my $target_file = $_[1];
+    $target_file = target_filepath($access_file,$target_file);
+    open(IN,"<$target_file");
+    binmode(IN);
+    my $size = -s $target_file;
+    my $read = read(IN, my $buffer,$size,0);
+    die "cannot read image file '$target_file' $!" unless defined $read;
+    close(IN);
+    $target_file =~ m/\.([^\.]+)$/;
+    $postfix = $1;
+    my $b64 = encode_base64($buffer);
+    $b64 =~ s/[\n\r]//g;
+    return "data:image/$postfix;base64,".$b64;
+}
+
+
+sub insert_datauri
+{
+    my $filename = $_[0];
+    my $inp = $_[1];
+
+    my @split_inp = split(/(\'|\")([^\'\"]*\.)(jpeg|jpg|png|gif|JPEG|JPG|PNG|GIF)(\'|\")/,$inp);
+    my $i = 0;
+    for ( ; $i <= $#split_inp ; ) {
+	my $sc = "";
+	for ( my $j = 0 ; $j < 4 ; $j ++ ) {
+	    $sc .= $split_inp[$i+$j];
+	}
+	if ( $sc =~ m/^(\'|\")([^\'\"]*\.)(jpeg|jpg|png|gif|JPEG|JPG|PNG|GIF)(\'|\")$/ ) {
+	    print "IS $sc ----\n";
+	    my $target_file = $2.$3;
+	    $split_inp[$i+1] = load_image($filename,$target_file);
+	    $split_inp[$i+2] = "";
+	    $i += 4;
+	}
+	else {
+	    $i ++;
+	}
+    }
+    return join("",@split_inp);
+}
+
+sub insert_script
+{
+    my $filename = $_[0];
+    my $inp = $_[1];
+
+    my @split_inp = split(/(\<)(SCRIPT|script)([^\>]*\>)([^\<\>]*)(\<\/)(SCRIPT|script)(\>)/,$inp);
+    my $i = 0;
+    for ( ; $i <= $#split_inp ; ) {
+	my $sc = $split_inp[$i];
+	if ( $split_inp[$i] eq "<" &&
+	     $split_inp[$i+1] =~ m/SCRIPT|script/ ) {
+	    $sc = $split_inp[$i+2];
+	    if ( $sc =~ m/type[ \t]*\=[ \t]*(\'|\")text\/javascript(\'|\")/ ) {
+		if ( $sc =~ s/src[ \t]*\=[ \t]*(\'|\")([^\"\']+)(\'|\")// ) {
+		    my $scfile = $2;
+		    $split_inp[$i+2] = $sc;
+		    $split_inp[$i+3] = "++++CR++++// ".$scfile."++++CR++++".load_script($filename,$scfile);
+		}
+	    }
+	    $i += 7;
+	}
+	else {
+	    $i ++;
+	}
+    }
+    return join("",@split_inp);
+}
+
+
+sub load_file
+{
+    my $fptr = $_[0];
+    my $filename = $fptr->{org}."/".$fptr->{file};
+    open(IN,"<$filename");
+    my $content = "";
+    while(<IN>) {
+	my $d = $_;
+	$d =~ s/[\n\r]//g;
+	$content .= $d."++++CR++++";
+    }
+    close(IN);
+    $content = replace_value($content);
+    $content = insert_datauri($filename,$content);
+    $content = insert_script($filename,$content);
+    $fptr->{content} = $content;
+}
+
+sub optimization
+{
+    my $inp = $_[0];
+    for ( ; $inp =~ s/\+\+\+\+CR\+\+\+\+[ \t]+\+\+\+\+CR\+\+\+\+/++++CR++++/ ; ) {
+    }
+    $inp =~ s/[ \t]+$//g;
+    for ( ; $inp =~ s/\+\+\+\+CR\+\+\+\+\+\+\+\+CR\+\+\+\+$// ; ) {
+    }
+    return $inp;
+}
+
+sub indent
+{
+    my $inp = $_[0];
+    $inp =~ s/\+\+\+\+CR\+\+\+\+/++++CR++++\t/g;
+    $inp = "\t".$inp;
+    $inp = optimization($inp);
+    return $inp;
+}
+
+sub parse_refcontent
+{
+    my $fptr = $_[0];
+    my $pcode = $fptr->{code};
+    my $content = $fptr->{resolve};
+    $content =~ s/\+\+\+\+CR\+\+\+\+/\n/g;
+    $fptr->{refcontent} = "<div gclass=\"*\" gid=\"__PIG$pcode\">++++CR++++".indent($fptr->{resolve})."++++CR++++</div>";
+}
+
+
+sub make_marshaller
+{
+    my $fptr = $_[0];
+    my $inp = $_[1];
+    my $filename = $_[2];
+    my $gaction = "";
+    if ( $inp =~ s/gaction[ \t]*\=[ \t]*((\'[^\']*\')|(\"[^\"]\"))// ) {
+	$gaction = $1;
+	$gaction =~ s/^[\"\']//;
+	$gaction =~ s/[\"\']$//;
+    }
+    $filename =~ s/\+\+\+\+CR\+\+\+\+[ \t]*//g;
+    my @fary = split(/[ \t]*,[ \t]*/,$filename);
+    my @ffary;
+    foreach ( @fary ) {
+	my $f = $_;
+	if ( !($f =~ m/^(.*)\:(.*)$/) ) {
+	    die "pig:include marchaller file format is invalid $filename";
+	}
+	my $tag = $1;
+	my $fn = $2;
+	$fn =~ s/^[ \t]+//;
+	$fn =~ s/[ \t]+$//;
+	if ( $fn =~ m/^\// ) {
+	    $fn= $base_orgdir.$fn;
+	    if ( !$html{$fn} ) {
+		die "$fn cannot resolve in ".$fptr->{org}."/".$fptr->{file};
+	    }
+	}
+	else {
+	    my $tff = $fn;
+	    $fn = $fptr->{org}."/".$tff;
+	    if ( !$html{$fn} ) {
+		$fn = get_htmlpath($tff);
+		if ( !$fn ) {
+		    die "$tff cannot resolve in ".$fptr->{org}."/".$fptr->{file};
+		}
+	    }
+	}
+	my $pcode = $html{$fn}->{code};
+	$tag =~ s/^[ \t]+//;
+	$tag =~ s/[ \t]+$//;
+	push(@ffary,{
+	    tag => $tag,
+	    filename => $fn,
+	    code => $pcode});
+	$fptr->{ref}->{$pcode} = $html{$fn};
+    }
+    my $initial = "*__PIG".$ffary[0]->{code};
+    my $pcode = $ffary[0]->{code};
+
+    my $ma = '
+	["marshaller",
+		["F",["v.pigTarget"],	["a.src"]],
+		["I",                   ["'.$initial.'"]],';
+    foreach ( @ffary ) {
+	my $el = $_;
+	my $rule = 
+'++++CR++++		["R",["'.$el->{tag}.'"],["*__PIG'.$el->{code}.'"]],';
+	$ma .= $rule;
+    }
+    $ma .=
+'++++CR++++		["R",[""],[""]]]++++CR++++';
+
+    if ( $gaction ) {
+	$gaction = '["sq",{"v.pigTarget" : null},["para",'.$ma.",".$gaction.']]';
+    }
+    else {
+	$gaction = '["sq",{"v.pigTarget" : null},'.$ma.']';
+    }
+    $inp =~ s/\/\>$/ gaction=\'$gaction\' src=\"*__PIG$pcode\"\/\>/;
+    return $inp;
+}
+
+sub parse_include
+{
+    my $fptr = $_[0];
+    my $content = $fptr->{content};
+    my $retcontent = "";
+    $fptr->{ref} = {};
+    for ( ; $content =~ s/^(.*?)(\<[ \t]*pig\:include)// ; ) {
+	my $prev  = $1;
+	my $inc = $2;
+	if ( $content =~ s/((.*?)\/\>)// ) {
+	    my $cont = $1;
+	    $inc .= $cont;
+	}
+	if ( !($inc =~ s/pig\:file[ \t]*\=[ \t]*(\"|\')([^\"\']*)(\"|\')//) ) {
+	    die "invalid pig:include tag pig:file is required $inc (in ".$fptr->{file}.") of /> is not detected.";
+	}
+	my $filename = $2;
+	if ( $filename =~ m/(.*)\:(.*)/ ) {
+	    $inc = make_marshaller($fptr,$inc,$filename);
+	    $inc =~ s/pig\:include/div/;
+	    if ( $inc =~ s/gclass[ \t]*\=[ \t]*[\'\"]([^\"\']+)[\'\"]// ) {
+		my $cls = $1;
+print STDERR "--2-- $cls\n";
+		if ( $cls =~ m/^\*/ ) {
+		    $inc =~ s/\/\>$/ gclass=\"\*gtFrame\" \><\/div>/;
+		}
+		else {
+		    $inc =~ s/\/\>$/ gclass=\"gtFrame\" \><\/div>/;
+		}
+	    }
+	    else {
+		$inc =~ s/\/\>$/ gclass=\"gtFrame\" \><\/div>/;
+	    }
+	    $retcontent .= $prev.$inc;
+	    next;
+	}
+	elsif ( $filename =~ m/^\// ) {
+	    $filename = $base_orgdir.$filename;
+	    if ( !$html{$filename} ) {
+		die "$filename cannot resolve in ".$fptr->{org}."/".$fptr->{file};
+	    }
+	}
+	else {
+	    my $tff = $filename;
+	    $filename = $fptr->{org}."/".$tff;
+	    if ( !$html{$filename} ) {
+		$filename = get_htmlpath($tff);
+		if ( !$filename ) {
+		    die "$tff cannot resolve in ".$fptr->{org}."/".$fptr->{file};
+		}
+	    }
+	}
+	$pcode = $html{$filename}->{code};
+	$inc =~ s/pig\:include/div/;
+	if ( $inc =~ s/gclass[ \t]*\=[ \t]*[\'\"]([^\"\']+)[\'\"]// ) {
+	    my $cls = $1;
+print STDERR "---- $cls\n";
+	    if ( $cls =~ m/^\*/ ) {
+		$inc =~ s/\/\>$/ gclass=\"\*gtFrame\" src=\"*__PIG$pcode\" \><\/div>/;
+	    }
+	    else {
+		$inc =~ s/\/\>$/ gclass=\"gtFrame\" src=\"*__PIG$pcode\" \><\/div>/;
+	    }
+	}
+	else {
+	    $inc =~ s/\/\>$/ gclass=\"gtFrame\" src=\"*__PIG$pcode\" \><\/div>/;
+	}
+	$retcontent .= $prev.$inc;
+	$fptr->{ref}->{$pcode} = $html{$filename};
+    }
+    $retcontent .= $content;
+    $fptr->{resolve} = $retcontent;
+}
+
+sub parse_getref
+{
+    my $fptr = $_[0];
+    my $ret = 0;
+    foreach ( keys %{$fptr->{ref}} ) {
+	my $code = $_;
+	foreach ( keys %{$fptr->{ref}->{$code}->{ref}} ) {
+	    my $rcode = $_;
+	    if ( $fptr->{ref}->{$rcode} ) {
+		next;
+	    }
+	    $ret = 1;
+	    $fptr->{ref}->{$rcode} = $fptr->{ref}->{$code}->{ref}->{$rcode};
+	}
+    }
+    return $ret;
+}
+
+
+sub scan_html
+{
+    foreach ( keys %html ) {
+	my $filename = $_;
+	my $fptr = $html{$filename};
+	load_file($fptr);
+    }
+    foreach ( keys %html ) {
+	my $filename = $_;
+	my $fptr = $html{$filename};
+	parse_include($fptr);
+    }
+    foreach ( keys %html ) {
+	my $filename = $_;
+	my $fptr = $html{$filename};
+	parse_refcontent($fptr);
+    }
+    for ( ; ; ) {
+	my $flag = 0;
+	foreach ( keys %html ) {
+	    my $filename = $_;
+	    my $fptr = $html{$filename};
+	    if ( parse_getref($fptr) ) {
+		$flag = 1;
+	    }
+	}
+	if ( $flag == 0 ) {
+	    last;
+	}
+    }
+    foreach ( keys %html ) {
+	my $filename = $_;
+	my $fptr = $html{$filename};
+	my $resolve = $fptr->{resolve};
+	my $prev = "";
+	if ( $resolve =~ s/^(.*?)(\<(body|BODY)([^\>"']*(('[^']*')|("[^"]*")|()))*\>)// ) {
+	    $prev = $1.$2."\n";
+	}
+	my $out_flag = 0;
+	foreach ( keys %{$fptr->{ref}} ) {
+	    my $kk = $_;
+	    $prev .= "<!---- ".$fptr->{ref}->{$kk}->{org}."/".$fptr->{ref}->{$kk}->{file}." ---->++++CR++++";
+	    $prev .= $fptr->{ref}->{$kk}->{refcontent}."++++CR++++";
+	    $out_flag = 1;
+	}
+	if ( $out_flag ) {
+	    $prev .= "<!---- FINISH REFERENCE --->++++CR++++";
+	}
+	my $output = $fptr->{target}."/".$fptr->{file};
+	print STDERR "output $output\n";
+	open(OUT,">$output");
+	$resolve = $prev.$resolve;
+	$resolve = optimization($resolve);
+	$resolve =~ s/\+\+\+\+CR\+\+\+\+/\n/g;
+	print OUT $resolve;
+	close(OUT);
+    }
+}
+
+if ( !$base_orgdir || !$base_targetdir ) {
+    die ( "base original dir base target dir");
+}
+scan_files($base_orgdir,$base_targetdir);
+scan_html();
+reverse_scan_files($base_orgdir,$base_targetdir);
+
+

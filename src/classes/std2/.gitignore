@@ -1,0 +1,7 @@
+# gitcopy ../../arch/posix_Linux/src/classes/std2 BEGIN
+nt_ifconfig_m.cpp
+nt_route.cpp
+# gitcopy ../../arch/posix_Linux/src/classes/std2 END
+# gitcopy ../../arch/posix/src/classes/std2 BEGIN
+nt_ifconfig.cpp
+# gitcopy ../../arch/posix/src/classes/std2 END
