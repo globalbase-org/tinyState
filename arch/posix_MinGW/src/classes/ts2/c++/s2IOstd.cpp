@@ -6,11 +6,13 @@
  *   FILE_TYPE_CHAR  -> console  -> ts2IOwinConsole (readiness bridge)
  *   FILE_TYPE_PIPE / _DISK      -> ts2IOdescriptor (overlapped)
  *
- * NOTE (refinement): the pipe path assumes the inherited std HANDLE is
- * overlapped-capable.  A child launched by ts2System gets *synchronous* pipe
- * ends today; making a tinyState child's stdio truly async needs ts2System to
- * create the child ends with FILE_FLAG_OVERLAPPED (which would break plain
- * synchronous children) or a per-handle reader thread.  Left as a follow-up.
+ * The pipe path needs the inherited std HANDLE to be overlapped-capable, so
+ * ts2System now creates the child pipe ends with FILE_FLAG_OVERLAPPED (see
+ * ts2sys_make_pipe).  Without that a tinyState child silently lost all
+ * parent->child stdin delivery — the overlapped ReadFile+IOCP below ran against
+ * a *synchronous* handle.  Overlapped ends still serve plain synchronous
+ * children (cmd/sort): a NULL-OVERLAPPED ReadFile/WriteFile on a byte-mode pipe
+ * blocks and completes normally (verified on real Windows 11).
  */
 
 /* WIN32_LEAN_AND_MEAN before <windows.h> keeps legacy <winsock.h> out, so

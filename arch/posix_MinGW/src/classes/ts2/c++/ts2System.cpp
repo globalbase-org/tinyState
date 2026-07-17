@@ -136,6 +136,10 @@ protected:
 
 	sPtr<ts2IO>	d_rfd;
 	sPtr<ts2IO>	d_efd;
+	sPtr<tinyState>	wait_pin;	/* self-ref held while the RegisterWait is armed,
+					   released only after UnregisterWaitEx — so the
+					   object cannot be freed while on_exit_cb may still
+					   fire with a raw `this`. */
 };
 
 TS_END_IMPLEMENT
@@ -226,7 +230,13 @@ HANDLE server = CreateNamedPipeA(name,openMode,PIPE_TYPE_BYTE|PIPE_WAIT,1,65536,
 SECURITY_ATTRIBUTES sa;
 	sa.nLength = sizeof(sa); sa.lpSecurityDescriptor = NULL; sa.bInheritHandle = TRUE;
 DWORD access = (dir == 0 ? GENERIC_READ : GENERIC_WRITE);
-HANDLE client = CreateFileA(name,access,0,&sa,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+	/* Child end is OVERLAPPED too: a tinyState child reads/writes its inherited
+	   std handles through s2IOstd -> ts2IOdescriptor (overlapped ReadFile+IOCP);
+	   a *synchronous* child end silently drops parent->child delivery.
+	   Overlapped handles still serve plain synchronous children (cmd/sort): a
+	   ReadFile/WriteFile with a NULL OVERLAPPED on a byte-mode pipe blocks and
+	   completes normally.  Windows-port design memo §E / s2IOstd follow-up. */
+HANDLE client = CreateFileA(name,access,0,&sa,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED,NULL);
 	if ( client == INVALID_HANDLE_VALUE ) {
 		CloseHandle(server);
 		return -1;
@@ -405,6 +415,7 @@ TS_STATE(ACT_FINISH)
 #endif
 		RegisterWaitForSingleObject(&waitHandle,hProcess,on_exit_cb,
 			this,INFINITE,WT_EXECUTEONLYONCE);
+		wait_pin = ifThis;	/* pin the object alive until FIN_UNREGISTER */
 	}
 	return rDO|ACT_FINISH_RET;
 }
@@ -452,5 +463,6 @@ TS_THREAD(FIN_UNREGISTER)
 	}
 	if ( hProcess ) { CloseHandle(hProcess); hProcess = NULL; }
 	if ( hJob )     { CloseHandle(hJob);     hJob = NULL; }
+	wait_pin = thNULL;	/* wait is unregistered; safe to drop the self-ref */
 	return rDO|FIN_TINYSTATE_START;
 }

@@ -410,8 +410,17 @@ int     pid;
 
 sPtr<stdArray<const char*> > args_cmd;
 const char ** args_ptr;
+sPtr<stdArray<sPtr<stdString> > > args;	/* MUST stay in scope until exec: args_cmd->ary[]
+					   below hold raw char* borrowed from these stdString
+					   buffers (via get_str()).  When this was declared
+					   inside the `#`-block it was destroyed at the block
+					   end — before fork/exec — freeing the strings and
+					   leaving args_cmd->ary[] dangling.  Linux happened to
+					   read the not-yet-reused memory intact; on Cygwin the
+					   concurrent framework threads reuse the freed heap, so
+					   argv[0] came back garbage and execvp failed with
+					   ENOENT ~65% of the time (lost child I/O). */
 	if ( command[0] == '#' ) {
-	sPtr<stdArray<sPtr<stdString> > > args;
 	sPtr<stdString>  cmd,  v,  res;
 	sPtr<stdRx>  rx1, rx2,  rx3;
 	int i;

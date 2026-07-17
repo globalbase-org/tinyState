@@ -201,9 +201,27 @@ tsApplication_::eventHandler(sPtr<stdEvent>  ev,sPtr<stdThreadInfo> __thrInfo)
 	STATE MACHINE
 ********************************************/
 
+#ifndef _WIN32
+#include	<signal.h>
+/* Process-wide no-op SIGPIPE handler, installed once at app startup and never
+   removed.  tinyState::destroy() sends THR_KILL(SIGPIPE) to interrupt blocked
+   workers (and broken-pipe writes raise SIGPIPE too); without a handler the
+   process dies.  It must be a *no-op handler* — not SIG_IGN, which would stop
+   THR_KILL from interrupting the syscall — and it must outlive the whole run
+   incl. async teardown.  The framework already installs this in spawned children
+   (ts2System do_exec); doing it here covers the parent for EVERY tinyState app,
+   so apps no longer depend on an app-level tsSignal(SIGPIPE) that cannot win the
+   teardown race (destroy-early → unhandled THR_KILL crash; destroy-never → the
+   tsSignal registration hangs the reactor). */
+static void ts_app_sigpipe_noop(int sig) { ::signal(sig, ts_app_sigpipe_noop); }
+#endif
+
 TS_STATE(INI_START)
 {
   	stdObject::start();
+#ifndef _WIN32
+	::signal(SIGPIPE, ts_app_sigpipe_noop);
+#endif
 	this->global = thNEW( stdQueue<tsApplicationGlobal>,());
 	eventHandler_flag = 1;
 	fwClass = thNEW(fwIO,(ifThis));
