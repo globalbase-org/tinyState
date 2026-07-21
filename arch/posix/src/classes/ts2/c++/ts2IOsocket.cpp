@@ -73,12 +73,23 @@ public:
 	 */
 	int recvmmsg(struct mmsghdr * msgvec,unsigned int vlen,int flags,
 			struct timespec * timeout);
+	/** @brief ENHANCED(RIO) 受信の同時 post 深さを制限する (計測用ノブ)。0=無制限。
+	 *  / Cap concurrently-posted RIO receives (measurement knob).  Only the Windows (RIO)
+	 *  overlay acts on it; on POSIX it is stored and ignored (already batched). */
+	void set_rio_recv_depth(int depth);
+	/** @brief ENHANCED(RIO) リングのスロット数 (計測用ノブ)。Windows RIO のみ作用、POSIX は保存のみ。 */
+	void set_rio_ring_slots(int slots);
 private:
 protected:
 	TS_DEFARGS
 	/* batch cursor across yields — used only by the __CYGWIN__ per-datagram
-	   fallback (native Linux recvmmsg/sendmmsg is one syscall, no cursor). */
+	   fallback.  Linux (native recvmmsg/sendmmsg) and macOS (recvmsg_x/
+	   sendmsg_x) each transfer the batch in one syscall, so they need no cursor. */
 	unsigned int	mmsg_i;
+	/* RIO recv-depth / ring-slots knob intent; stored and ignored on POSIX (RIO is
+	   Windows-only; Linux/macOS are already batched, Cygwin uses the per-datagram fallback). */
+	int		rio_recv_depth;
+	int		rio_slots;
 };
 
 TS_END_IMPLEMENT
@@ -97,6 +108,8 @@ ts2IOsocket_::ts2IOsocket_(TS_ARGS0)
 {
     TS_CPARGS0
     mmsg_i = 0;
+    rio_recv_depth = 0;
+    rio_slots = 0;
 }
 
 ts2IOsocket_::ts2IOsocket_(TS_ARGS1)
@@ -104,6 +117,8 @@ ts2IOsocket_::ts2IOsocket_(TS_ARGS1)
 {
     TS_CPARGS1
     mmsg_i = 0;
+    rio_recv_depth = 0;
+    rio_slots = 0;
 }
 
 
@@ -233,10 +248,115 @@ int er;
 	}
 }
 
-#else /* __CYGWIN__ || __APPLE__ */
+#elif defined(__APPLE__)
 
 /*
- * Cygwin / macOS have no batched mmsg syscall, so loop ::sendmsg/::recvmsg one datagram
+ * macOS/Darwin: batched datagram I/O via sendmsg_x / recvmsg_x (self-declared in
+ * ts_mmsg.h — exported by libSystem, absent from the SDK headers).  Structurally
+ * identical to the Linux native path above (one syscall; EAGAIN yields), with a
+ * struct mmsghdr[] <-> struct msghdr_x[] translation.  Up to TS2_MMSG_MAXMSG are
+ * processed per call; callers advance msgvec for longer vectors (the standard
+ * mmsg partial-return contract, exactly as native recvmmsg returns "as many as
+ * are ready").  No mmsg_i cursor: like Linux, one syscall either transfers >=1 or
+ * yields on EAGAIN — the per-datagram cursor is only for the Cygwin loop below.
+ */
+int
+ts2IOsocket_::sendmmsg(struct mmsghdr * msgvec,unsigned int vlen,int flags)
+{
+int er;
+struct msghdr_x xv[TS2_MMSG_MAXMSG];
+	if ( C_TEST(tinyState_::state(),C_ZOM|C_FIN) ) {
+		err = EBADF;
+		return -1;
+	}
+	unsigned int n = vlen < TS2_MMSG_MAXMSG ? vlen : TS2_MMSG_MAXMSG;
+	for ( unsigned int i = 0 ; i < n ; i++ ) {
+		struct msghdr * h = &msgvec[i].msg_hdr;
+		xv[i].msg_name       = h->msg_name;
+		xv[i].msg_namelen    = h->msg_namelen;
+		xv[i].msg_iov        = h->msg_iov;
+		xv[i].msg_iovlen     = (int)h->msg_iovlen;
+		xv[i].msg_control    = h->msg_control;
+		xv[i].msg_controllen = h->msg_controllen;
+		xv[i].msg_flags      = h->msg_flags;
+		xv[i].msg_datalen    = 0;
+	}
+	for ( ; ; ) {
+		er = ::sendmsg_x(fd,xv,n,flags);
+		if ( er >= 0 ) {
+			for ( int i = 0 ; i < er ; i++ )
+				msgvec[i].msg_len = (unsigned int)xv[i].msg_datalen;
+			return er;
+		}
+		switch ( errno ) {
+		case EINTR:
+			continue;
+		case EAGAIN:
+			io->write(sCallSection::key->caller(),fd);
+			throw sException([this](sPtr<tinyState> caller) {
+				return !io->is_read(caller);
+			});
+		}
+		err = errno;
+		state = TS2IO_ERROR;
+		return er;
+	}
+}
+
+int
+ts2IOsocket_::recvmmsg(struct mmsghdr * msgvec,unsigned int vlen,int flags,
+			struct timespec * timeout)
+{
+int er;
+struct msghdr_x xv[TS2_MMSG_MAXMSG];
+	(void)timeout;	/* recvmsg_x has no per-call timeout; socket is O_NONBLOCK */
+	if ( C_TEST(tinyState_::state(),C_ZOM|C_FIN) ) {
+		err = EBADF;
+		return -1;
+	}
+	unsigned int n = vlen < TS2_MMSG_MAXMSG ? vlen : TS2_MMSG_MAXMSG;
+	for ( unsigned int i = 0 ; i < n ; i++ ) {
+		struct msghdr * h = &msgvec[i].msg_hdr;
+		xv[i].msg_name       = h->msg_name;
+		xv[i].msg_namelen    = h->msg_namelen;
+		xv[i].msg_iov        = h->msg_iov;
+		xv[i].msg_iovlen     = (int)h->msg_iovlen;
+		xv[i].msg_control    = h->msg_control;
+		xv[i].msg_controllen = h->msg_controllen;
+		xv[i].msg_flags      = 0;
+		xv[i].msg_datalen    = 0;
+	}
+	for ( ; ; ) {
+		er = ::recvmsg_x(fd,xv,n,flags);
+		if ( er >= 0 ) {
+			for ( int i = 0 ; i < er ; i++ ) {
+				struct msghdr * h = &msgvec[i].msg_hdr;
+				h->msg_namelen    = xv[i].msg_namelen;
+				h->msg_controllen = xv[i].msg_controllen;
+				h->msg_flags      = xv[i].msg_flags;
+				msgvec[i].msg_len = (unsigned int)xv[i].msg_datalen;
+			}
+			return er;
+		}
+		switch ( errno ) {
+		case EINTR:
+			continue;
+		case EAGAIN:
+			io->read(sCallSection::key->caller(),fd);
+			throw sException([this](sPtr<tinyState> caller) {
+				return !io->is_read(caller);
+			});
+		}
+		err = errno;
+		state = TS2IO_ERROR;
+		return er;
+	}
+}
+
+#else /* __CYGWIN__ */
+
+/*
+ * Cygwin has no batched mmsg syscall, so loop ::sendmsg/::recvmsg one datagram
  * at a time (the socket is O_NONBLOCK, like the recvfrom path).  POSIX
  * semantics: fill/drain as many as are ready WITHOUT blocking, block (yield)
  * only when we have none yet.  mmsg_i persists across the yield; the state
@@ -309,7 +429,23 @@ int er;
 	{ unsigned int r = mmsg_i; mmsg_i = 0; return (int)r; }
 }
 
-#endif /* __CYGWIN__ || __APPLE__ */
+#endif /* platform mmsg backend */
+
+
+/* ENHANCED(RIO) recv-depth knob: stored and ignored on POSIX (Linux/macOS are already
+   batched, Cygwin uses the per-datagram fallback).  Present so the shared interface is
+   uniform across arches — only the Windows RIO overlay acts on it. */
+void
+ts2IOsocket_::set_rio_recv_depth(int depth)
+{
+	rio_recv_depth = depth;
+}
+
+void
+ts2IOsocket_::set_rio_ring_slots(int slots)
+{
+	rio_slots = slots;
+}
 
 
 /*******************************************

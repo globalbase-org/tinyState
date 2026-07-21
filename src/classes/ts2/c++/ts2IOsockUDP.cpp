@@ -1,6 +1,7 @@
 
 
 #include	"_ts2/c++/ts2IOsockUDP_.h"
+#include	<cstdlib>	/* getenv (TS2_DISABLE_RIO) */
 
 CLASS_TINYSTATE(ts2/c++/ts2IOsockUDP,ts2/c++/ts2IOsocket)
 
@@ -24,6 +25,15 @@ TS_BEGIN_IMPLEMENT
  * / Runs `socket()` → `bind()` → optional `connect()` in `INI_START` (TS_THREAD).
  * If `conn` is non-NULL, the socket is connected and `read()`/`write()` work;
  * otherwise use `sendto()`/`recvfrom()` (connectionless UDP).
+ *
+ * データパスは OS が持つ最良の datagram バックエンドを自動選択する（インタフェースは全 OS 統一・
+ * 生成フラグ不要）。Windows は RIO を既定とし、RIO 不可時（Windows 7 / wine / 環境変数
+ * `TS2_DISABLE_RIO`）は plain overlapped へ自動フォールバックする。Linux/macOS は native の
+ * sendmmsg / recvmsg_x。**各 OS の実装マトリックスとチューニングノブは docs/SOCKET.md を参照**。
+ * / The data path auto-selects the OS's best datagram backend (uniform interface, no mode
+ * flag): Windows defaults to RIO, degrading to plain overlapped when RIO is unavailable
+ * (Windows 7 / wine / the TS2_DISABLE_RIO env var); Linux/macOS use native sendmmsg /
+ * recvmsg_x.  See docs/SOCKET.md for the per-OS matrix and tuning knobs.
  */
 class TS_THISCLASS : public TS_BASECLASS {
 public:
@@ -100,7 +110,28 @@ ts2IOsockUDP_::ts2IOsockUDP_(TS_ARGS1)
 
 TS_THREAD(INI_START)
 {
-  	sock = soSOCKET(AF_INET,SOCK_DGRAM,0);
+#ifdef _WIN32
+  	/* Datagram default = RIO (registered I/O): the socket is created with
+  	   WSA_FLAG_REGISTERED_IO so its data path can go through RIO (RIOSendEx/
+  	   RIOReceiveEx).  Fall back to a plain overlapped socket when RIO is
+  	   unavailable — Windows 7 (no RIO) rejects the flag at creation, and the
+  	   env var TS2_DISABLE_RIO forces plain (testing / many-socket memory / a
+  	   safety valve).  wine has no RIO ioctl, so the socket is created here but
+  	   the base degrades to plain at the first I/O (ensure_rio).  The base
+  	   ts2IOsocket `enhanced` member is the runtime choice, confirmed there;
+  	   a REGISTERED_IO socket also supports plain overlapped I/O. */
+  	enhanced = ::getenv("TS2_DISABLE_RIO") ? 0 : 1;
+  	if ( enhanced ) {
+  	SOCKET rs = WSASocketW(AF_INET,SOCK_DGRAM,0,NULL,0,
+  				WSA_FLAG_REGISTERED_IO|WSA_FLAG_OVERLAPPED);
+  		if ( rs == INVALID_SOCKET )	enhanced = 0;		/* no RIO here → plain */
+  		else				sock = (int)(INT_PTR)rs;
+  	}
+  	if ( ! enhanced )
+  		sock = soSOCKET(AF_INET,SOCK_DGRAM,0);
+#else
+  	sock = soSOCKET(AF_INET,SOCK_DGRAM,0);			/* POSIX: native, no RIO */
+#endif
 	if ( sock < 0 ) {
 		errpos = "socket";
 		err = errno;

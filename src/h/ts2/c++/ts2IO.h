@@ -12,6 +12,12 @@
 #define TS2IO_ERROR	3  ///< エラー発生。`err` にエラーコードが入る。/ Error occurred; see `err`.
 /** @} */
 
+/* NOTE: the old TS2IO_SOCKET_ENHANCED creation flag was removed (2026-07-21).  The
+   datagram accelerated path is now automatic and uniform across OSes: ts2IOsockUDP uses
+   the platform's best datagram backend by default (Windows = RIO, degrading to plain
+   overlapped when RIO is unavailable — Win7 / wine / env TS2_DISABLE_RIO; Linux/macOS =
+   native batched sendmmsg / recvmsg_x).  No caller flag is needed.  See docs/SOCKET.md. */
+
 #include	"_ts2/c++/ts2IO_pb.h"
 
 #endif

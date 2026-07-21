@@ -40,6 +40,12 @@
    subclass TU that includes its layout resolve.  Windows-port design memo throughput step #1. */
 #include "std2/ts_mmsg.h"
 
+/* RIO (Registered I/O) ABI.  ts2IOsocket_'s ENHANCED members (RIO_RQ /
+   RIO_BUFFERID / RIO_CQ / wait handles) land in its generated layout header, so
+   — like ts_mmsg.h — every subclass TU that includes that layout needs the
+   types.  Supplied MinGW-wide here.  Windows-port throughput step #2 (RIO). */
+#include "std2/ts_rio.h"
+
 #include <math.h>
 #include <stdint.h>
 #include "tinyState_config.h"

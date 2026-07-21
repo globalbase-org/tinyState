@@ -69,14 +69,55 @@ struct mmsghdr {
 
 #if defined(__CYGWIN__) || defined(__APPLE__)
 /* Cygwin and macOS (BSD) provide POSIX msghdr/iovec + recvmsg/sendmsg but NOT
-   the Linux batched mmsg syscalls (no struct mmsghdr / recvmmsg / sendmmsg).
-   Define just the vector wrapper; ts2IOsocket (arch/posix) falls back to a
-   per-datagram recvmsg/sendmsg loop under __CYGWIN__ / __APPLE__. */
+   the Linux `struct mmsghdr` type.  Define just the vector wrapper so the
+   ts2IOsocket signature and caller code are source-identical.  Cygwin then
+   falls back to a per-datagram recvmsg/sendmsg loop (arch/posix, __CYGWIN__);
+   macOS uses the real batched syscalls below. */
 struct mmsghdr {
 	struct msghdr	msg_hdr;
 	unsigned int	msg_len;
 };
 #endif
+
+#ifdef __APPLE__
+/* macOS/Darwin DOES have a batched-datagram syscall pair — sendmsg_x /
+   recvmsg_x (struct msghdr_x []) — the Darwin equivalent of Linux
+   sendmmsg/recvmmsg.  But the CommandLineTools SDK headers do NOT declare them
+   or struct msghdr_x (they live in XNU bsd/sys/socket.h behind
+   __APPLE_API_PRIVATE and are stripped from the shipped SDK).  The symbols ARE
+   exported by libSystem, so we self-declare the XNU ABI here and link against
+   the default libSystem.  Verified on macOS 14.8.3/arm64: both resolve at link
+   time.  ts2IOsocket (arch/posix, __APPLE__ branch) translates
+   struct mmsghdr[] <-> struct msghdr_x[] and issues ONE batched syscall — the
+   real mmsg acceleration for macOS, not the per-datagram fallback.
+
+   struct msghdr_x == POSIX struct msghdr + a trailing size_t msg_datalen (the
+   per-message byte count, analogous to mmsghdr.msg_len).  Field order/types
+   match XNU exactly (note msg_iovlen is int, as in the BSD msghdr). */
+#include	<sys/types.h>	/* ssize_t */
+
+#define TS2_MMSG_MAXMSG	64	/* struct msghdr_x scratch cap per batched call */
+
+struct msghdr_x {
+	void *		msg_name;	/* optional address */
+	socklen_t	msg_namelen;	/* size of address */
+	struct iovec *	msg_iov;	/* scatter/gather array */
+	int		msg_iovlen;	/* # elements in msg_iov */
+	void *		msg_control;	/* ancillary data (cmsg) */
+	socklen_t	msg_controllen;	/* ancillary data buffer len */
+	int		msg_flags;	/* flags on received message */
+	size_t		msg_datalen;	/* byte length transferred for this hdr */
+};
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+ssize_t sendmsg_x(int, const struct msghdr_x *, unsigned int, int);
+ssize_t recvmsg_x(int, struct msghdr_x *, unsigned int, int);
+#ifdef __cplusplus
+}
+#endif
+#endif /* __APPLE__ */
 
 #endif
 

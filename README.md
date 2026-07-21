@@ -36,9 +36,9 @@ TS_STATE(ACT_WAIT_RETURN) {
   locks without deadlocking).
 - **Type-safe codegen** — a small generator (`tscpp2`) keeps C++ type safety
   while encoding transitions as named states.
-- **Portable** — Linux, plus Windows via Cygwin (POSIX) and MSYS2 / MinGW-w64
-  (native PE). Self-hosting CMake build on every platform; no boost, no curl,
-  no OpenSSL dependency.
+- **Portable** — runs on Linux and Windows (Cygwin + MinGW-w64) from a single
+  self-hosting CMake build; no boost, no curl, no OpenSSL dependency. See
+  [Platform support](#platform-support).
 
 ## Quick start
 
@@ -62,6 +62,18 @@ find_package(tinyState REQUIRED)
 add_tinystate_example(NAME myapp
   SOURCES src/main/main.cpp src/classes/hw/c++/hwMyClass.cpp)
 ```
+
+## Platform support
+
+| Platform | Toolchain | Status |
+|---|---|---|
+| Linux | GCC / Clang | ✅ Primary |
+| Windows (Cygwin) | Cygwin GCC (POSIX) | ✅ Supported |
+| Windows (MSYS2 / MinGW-w64) | MinGW-w64 (native PE) | ✅ Supported |
+| macOS | Apple Clang | ✅ Supported |
+
+All platforms build from the same self-hosting CMake tree — no boost, no curl,
+no OpenSSL dependency.
 
 ## Documentation
 

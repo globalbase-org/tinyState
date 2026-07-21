@@ -203,24 +203,36 @@ tsApplication_::eventHandler(sPtr<stdEvent>  ev,sPtr<stdThreadInfo> __thrInfo)
 
 #ifndef _WIN32
 #include	<signal.h>
-/* Process-wide no-op SIGPIPE handler, installed once at app startup and never
-   removed.  tinyState::destroy() sends THR_KILL(SIGPIPE) to interrupt blocked
-   workers (and broken-pipe writes raise SIGPIPE too); without a handler the
-   process dies.  It must be a *no-op handler* — not SIG_IGN, which would stop
-   THR_KILL from interrupting the syscall — and it must outlive the whole run
-   incl. async teardown.  The framework already installs this in spawned children
-   (ts2System do_exec); doing it here covers the parent for EVERY tinyState app,
-   so apps no longer depend on an app-level tsSignal(SIGPIPE) that cannot win the
-   teardown race (destroy-early → unhandled THR_KILL crash; destroy-never → the
-   tsSignal registration hangs the reactor). */
-static void ts_app_sigpipe_noop(int sig) { ::signal(sig, ts_app_sigpipe_noop); }
+/* Process-wide no-op SIGPIPE handler, installed once at app startup via
+   sigaction() and never removed.  tinyState::destroy() sends THR_KILL(SIGPIPE)
+   (pthread_kill) to interrupt a blocked worker's syscall, and broken-pipe writes
+   raise SIGPIPE too; without a handler the process dies.  Three requirements —
+   all satisfied deterministically by sigaction(SIGPIPE, {noop, mask=empty,
+   flags=0}):
+     - a *no-op handler*, NOT SIG_IGN: SIG_IGN would not deliver, so THR_KILL
+       could no longer EINTR-interrupt the worker's blocking syscall;
+     - NO SA_RESTART (sa_flags=0): the interrupted syscall must return EINTR —
+       with SA_RESTART it would auto-resume and THR_KILL would be a no-op;
+     - NO SA_RESETHAND: the disposition stays installed across every delivery, so
+       it survives the async-teardown burst of THR_KILL / broken-pipe SIGPIPEs.
+   The older signal()-with-self-reinstall had ambiguous BSD/SysV semantics: under
+   SysV reset-on-delivery there was a window where a second SIGPIPE hit SIG_DFL
+   and killed the process at teardown (a rare rc=141), and re-arming from inside
+   the handler is not async-signal-safe. */
+static void ts_app_sigpipe_noop(int) { }
 #endif
 
 TS_STATE(INI_START)
 {
   	stdObject::start();
 #ifndef _WIN32
-	::signal(SIGPIPE, ts_app_sigpipe_noop);
+	{
+	struct sigaction sa;
+		sa.sa_handler = ts_app_sigpipe_noop;
+		sigemptyset(&sa.sa_mask);	/* no :: — sigemptyset is a function-like macro on macOS/BSD */
+		sa.sa_flags = 0;	/* no SA_RESTART → EINTR for THR_KILL; no SA_RESETHAND → persistent */
+		::sigaction(SIGPIPE, &sa, NULL);
+	}
 #endif
 	this->global = thNEW( stdQueue<tsApplicationGlobal>,());
 	eventHandler_flag = 1;
