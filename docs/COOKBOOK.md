@@ -631,6 +631,134 @@ TS_STATE(ACT_ACQUIRE) {
 
 ---
 
+## 6.7. OS コールバック / foreign スレッドから状態機械へ橋渡しする
+
+OS の非同期機構 — threadpool I/O 完了 (`CreateThreadpoolIo`)、`RegisterWaitForSingleObject`、外部ライブラリの完了コールバック等 — は **tinyState 管理外の foreign スレッド**でコールバックを呼ぶ。ここで tinyState のロジックを直接走らせたり、`application->mtx` を直接触ったりしてはいけない。橋渡しには決まった作法がある。
+
+### 鉄則: コールバックは「最小更新 + `wakeup()`」だけ
+
+```cpp
+// foreign スレッド上で呼ばれる
+static void CALLBACK on_complete(void * ctx, /* result 引数 */) {
+    MyClass_ * self = (MyClass_*)ctx;
+    self->shared.update(/* result */);   // ← 専用 mutex の小クラスに閉じ込めた最小更新のみ
+    self->wakeup();                       // ← 状態機械へ制御を返すだけ。以降は SM が全部やる
+}
+```
+
+- **コールバックが呼ばれている = オブジェクトはまだ生きている**(解放前に必ず drain する。後述)。だから `C_ZOM` 判定は不要。
+- **`application->mtx` を直接取らない**。次の I/O 発行・待ち手の起床・遷移判断といったオーケストレーションは、**すべて自オブジェクトの `TS_STATE`(mtx 内)/ `TS_THREAD`(mtx 外)** で行う。
+- `wakeup()`(= `eventHandler(TSE_WAKEUP)`)は **再入安全**:オブジェクトが実行中なら event を queue、`C_ZOM` なら drop する。これが tinyState の売りなので、**foreign スレッドからの `wakeup()` は常に安全**。自己再入を自分で心配する必要はない。
+
+### 共有データは専用 `sThreadMutex` の小クラスに封じる
+
+コールバック(foreign)と状態機械(app-mtx)の**両方が触る**共有データは、`application->mtx` ではなく**専用の `sThreadMutex`** で守る。mutex ごと自己完結した小クラスに閉じ込め、両者はそのクラスのメソッド越しにしか触らない。
+
+```cpp
+class Shared {                       // callback と SM の境界。全メソッドが自前 mtx 内で完結
+    sThreadMutex mtx;
+    /* buf / index / flags ... */
+public:
+    void update(/* result */);       // callback(foreign)から呼ぶ
+    int  consume(/* out */);         // SM(TS_STATE)から呼ぶ
+};
+```
+
+理由: foreign スレッドは `application->mtx` を取ってはいけない(ロック順序を壊す・鉄則3)。専用 mtx なら **foreign 側も安全に触れ、SM 側とも排他**できる。「OS が書き込み中の領域は完了通知が来るまで誰も触らない」といった不変条件も、この小クラス内に閉じ込めて守る。
+
+### pump パターン: 冪等な「起こされたら全部再評価」状態
+
+オーケストレーションは **1 つの冪等な pump 状態**に集約する。`return 0`(sleep)し、`wakeup()` されるたびに「今やるべきことを全部再評価」する。メソッド呼び出し(read/write 等)からでもコールバックからでも、kick は `wakeup()` 一択。
+
+```cpp
+TS_STATE(ACT_PUMP) {
+    if ( is_destroyed() ) return rDO | FIN_START;
+    // (1) 発行すべき I/O を発行(1 方向 1 本など)
+    // (2) 起こすべき待ち手を起こす(下記 snapshot)
+    return 0;                        // 次の kick まで sleep
+}
+```
+
+冪等だから「誰が何のために起こしたか」を区別する必要がなく、状態が壊れない。read/write のようなメソッドは「Shared を触って足りなければ待ち行列に入り `wakeup()` して yield」、コールバックは「Shared を更新して `wakeup()`」——**どちらも pump を叩くだけ**。
+
+### 待ち手を起こすときは snapshot してから
+
+起こした tinyState が、その場で**即座に自分を同じキューへ再登録**しうる。ループ中に生キューを直接舐めると壊れる(無限ループ・二重処理)。**退避してクリアしてから**起こす:
+
+```cpp
+sPtr<stdQueue<tinyState> > wk = this->waiters;      // 退避
+this->waiters = thNEW(stdQueue<tinyState>,());      // 先に空へ差し替え
+for ( sPtr<tinyState> c ; (c = wk->del()) != thNULL ; )
+    c->eventHandler(thNEW(stdEvent,(TSE_RETURN, ifThis, (INTEGER64)0)));
+```
+
+`other->eventHandler` は **`TS_STATE` から呼べば無害**(内側で mtx を取り直す)。`TS_THREAD` で外部ロック保持中に呼ぶと逆順デッドロック(鉄則3)なので、起床は pump = TS_STATE で行う。
+
+### teardown: 解放前にコールバックを drain する
+
+オブジェクト/バッファを解放する前に、**未処理コールバックを drain** して「もう二度と呼ばれない」を保証する。`TS_THREAD` の FIN なら blocking 待ちが使える(mtx 外):
+
+```cpp
+TS_THREAD(FIN_...) {
+    closing = 1;                              // 以後 pump は再発行しない
+    CancelIoEx(fd, &ov);                      // 実 I/O を中断(中断完了が最後の callback を呼ぶ)
+    WaitForThreadpoolIoCallbacks(tpio, TRUE); // ← callback が全部終わるまでブロック
+    CloseThreadpoolIo(tpio);
+    /* ここで初めて Shared / バッファ / オブジェクトを解放して安全 */
+}
+```
+
+> ⚠️ **`WaitForThreadpoolIoCallbacks(io, FALSE)` は「未完了 I/O が *自然に完了* するまで」待つ。完了しない read-ahead は drain の *前に* 全部キャンセルせよ。** `FALSE` はキャンセルせず待つだけなので、read stream/datagram で先読み(read-ahead)の `ReadFile`/`WSARecvFrom` を張ったまま FALSE-drain に入ると、**その recv は二度と完了せず(データが来ない)永久ブロック**する。teardown 手順は必ず **① まず read 側を全部 `CancelIoEx`(never-completing を潰す)→ ② in-flight write を FALSE-wait で見送る/write-behind を drain → ③ 残りを `CancelIoEx(NULL)`+`WaitForThreadpoolIoCallbacks(TRUE)`** の順。サブクラス(datagram)が独自の read 側 ov を足したら、**base の FALSE-wait より前に**それもキャンセルすること(`drecv_ov` を base 呼び出し前にキャンセル)。
+>
+> 症状の見分け方: gdb で **FIN スレッドが `WaitForThreadpoolIoCallbacks` でブロック + threadpool worker が全部アイドル**なら、これ(完了しない I/O 待ち)。ロック競合ではないので app-mtx 保持者もブロック中の callback も居ない。
+>
+> ⚠️ **teardown 修正が実バイナリに入ったかは clean build で確認。** この手のハングは incremental ビルドが stale ると「直したはずが直っていない」を招き、トレース挿入時だけ再コンパイルされて通る=**偽 Heisenbug**に化ける(実際に一度誤診した。真因は本項の順序、`closing`/app-mtx 説は誤り)。base クラスのメンバ変更後も同様に clean build。
+
+drain プリミティブは機構ごとに:
+
+| 機構 | drain 方法 |
+|---|---|
+| threadpool I/O (`CreateThreadpoolIo`) | `WaitForThreadpoolIoCallbacks(io, TRUE)` |
+| threadpool wait / `RegisterWaitForSingleObject` | `UnregisterWaitEx(h, INVALID_HANDLE_VALUE)`(blocking) |
+| IOCP を手で回す | 「完了を待ってから解放」を自己参照 pin で寿命延長(`ts2System` の `addRefio`/`wait_pin` がその実装) |
+
+### リアクタを生かし続ける(fwIO 非登録の待ちに入るとき)
+
+OS threadpool(`CreateThreadpoolIo` / `RegisterWaitForSingleObject`)で完了を受ける経路は、**fwIO の read_objs/write_objs に何も登録しない**。ところがアプリのメインループ `fwIO::loop()` は「登録 fd が無く・interval も無く・`refio==0`」になった瞬間に**抜けて**しまう(= reactor teardown → プロセス終了)。つまり threadpool 完了だけを待って TS_STATE を yield すると、**完了が来る前に app ごと落ちてバッファ済みの読み書きが失われる**(実例: 高速に exit する子だけを相手にした `systest` が、pipe 完了前に reactor が抜けて出力ゼロになった)。
+
+これを防ぐイディオムが二点セット:
+
+| 呼ぶもの | 目的 |
+|---|---|
+| `application->fw()->addRefio()` / `delRefio()` | fd を登録せずに **loop() の終了条件を抑える**(`refio>0` の間ループは抜けない)。`delRefio()` の `wake()` が loop に終了条件を再評価させる |
+| `wait_pin = ifThis`(自己参照 sPtr)/ `wait_pin = thNULL` | foreign callback が**まだ発火し得る間、自オブジェクトを解放させない**(callback が `this` を触るので UAF 防止)。callback を drain し終えてから外す |
+
+```cpp
+// 冪等 pump(TS_STATE, app-mtx)で「未完 I/O or 待ち手あり」の間だけ保持する:
+int active = tpio && ( ring_posted || waiters_pending );
+if ( active && !io_ref ) { io->addRefio(); wait_pin = ifThis; io_ref = 1; }
+else if ( !active && io_ref ) { io->delRefio(); wait_pin = thNULL; io_ref = 0; }
+// FIN: WaitForThreadpoolIoCallbacks で drain した後に delRefio() + wait_pin=thNULL
+```
+
+**socket / console のような fwIO-IOCP 登録経路(accept/connect を fwIO に登録する)は、その登録自体が loop() を生かすので addRefio は不要**。keep-alive が要るのは「fwIO に何も登録しない threadpool 経路」だけ。実装: `ts2System`(子 exit 待ち)、`ts2IOdescriptor` base(pipe/stream の内部リング+threadpool)。
+
+> ⚠️ base クラス(`ts2IOdescriptor_` 等)にメンバを足すと**サブクラスのオブジェクトサイズが変わる**。codegen の custom_command 出力がスタンプのみ(生成 `_.h` が build グラフ上「生成物」として未モデル化)のため、**1 パスの incremental ビルドではサブクラス再コンパイルが漏れて古いレイアウトのまま落ちる**(SEGV)。base メンバ変更時は**クリーンビルド(または `cmake --build` を 2 回)**。
+
+### まとめ(この作法が守る不変条件)
+
+| 主体 | やること / やらないこと |
+|---|---|
+| foreign コールバック | **最小更新(専用 mtx)+ `wakeup()` のみ**。app-mtx 非接触・ロジック非実行・ZOM 判定不要 |
+| オーケストレーション | すべて自オブジェクトの **`TS_STATE`(app-mtx)/ `TS_THREAD`(mtx 外)** で。冪等 pump に集約 |
+| 共有データ | **専用 `sThreadMutex`** の小クラスに封じる(app-mtx で守らない) |
+| 待ち手起床 | **snapshot → clear → 起こす**(TS_STATE から) |
+| 寿命 | **解放前に callback を drain**(WaitForThreadpoolIoCallbacks / UnregisterWaitEx / pin) |
+
+実例: `ts2System` の子プロセス exit 待ち(`RegisterWaitForSingleObject` → `on_exit_cb` → 状態機械)、`ts2IOwinConsole`(コンソール入力の readiness wait)、`ts2IOdescriptor`(threadpool I/O + 内部リング + pump)。
+
+---
+
 ## 7. 外部シグナルを捕捉する
 
 `tsSignal` — OS シグナルを stdEvent に変換

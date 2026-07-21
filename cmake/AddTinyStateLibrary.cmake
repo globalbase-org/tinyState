@@ -38,8 +38,22 @@ function(add_tinystate_library)
     	string(REPLACE "/" "_" stamp ${src})
 	set(stamp_file ${STAMP_DIR}/${stamp}.t)
 
+	# tscpp2 emits ${CMAKE_BINARY_DIR}/_ts2/c++/<basename>_.h and _pb.h for each
+	# source (utils/tscpp2 genOutputName: <baseheader>/<header>/c++/<basename>).
+	# Declare those generated headers as REAL OUTPUTs — not just the stamp.  The
+	# compiler depfiles already record which _.h each object includes (e.g. a
+	# subclass .o includes its base's _.h for the layout), so once the build graph
+	# knows codegen *produces* those headers, a base-class member change rebuilds
+	# every subclass in ONE incremental pass.  With the stamp-only OUTPUT the
+	# headers were invisible generated files: cross-class edits went stale and
+	# produced silent wrong-layout binaries (needed a clean/second build).
+	# Basenames are project-unique (no duplicate-output collisions across libs).
+	get_filename_component(gen_base ${src} NAME_WLE)
+	set(gen_priv ${CMAKE_BINARY_DIR}/_ts2/c++/${gen_base}_.h)
+	set(gen_pub  ${CMAKE_BINARY_DIR}/_ts2/c++/${gen_base}_pb.h)
+
 	add_custom_command(
-		OUTPUT ${stamp_file}
+		OUTPUT ${stamp_file} ${gen_priv} ${gen_pub}
 		COMMAND ${STLCPP}
 		    file
 		    ${src}

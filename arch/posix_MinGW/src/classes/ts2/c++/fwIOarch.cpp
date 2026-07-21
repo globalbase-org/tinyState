@@ -1,9 +1,14 @@
 /*
- * fwIO — MinGW (IOCP) implementation.  Windows-port design memo §A/B.
+ * fwIO — MinGW (IOCP) backend.  Windows-port design memo §A/B.
  *
- * The POSIX version (arch/posix/.../fwIO.cpp) uses select() + a self-pipe wake.
- * Windows has no readiness-wait for pipe/file HANDLEs, so this version uses an
- * I/O Completion Port (IOCP):
+ * Architecture-specific half of fwIO (constructor, destructor, the wake
+ * mechanism and the IOCP reactor loop()).  The generic registration / query /
+ * dispatch API (read/write/wait, is_*, detach, addRefio/delRefio, abort, dump,
+ * printf) is shared and lives in src/classes/ts2/c++/fwIO.cpp.
+ *
+ * The POSIX backend (arch/posix/.../fwIOarch.cpp) uses select() + a self-pipe
+ * wake.  Windows has no readiness-wait for pipe/file HANDLEs, so this backend
+ * uses an I/O Completion Port (IOCP):
  *
  *   - IO objects (ts2IOdescriptor/ts2IOsocket, MinGW overlays) associate their
  *     HANDLE/SOCKET with this port via CreateIoCompletionPort(handle, port(),
@@ -14,13 +19,10 @@
  *     interval; on a completion it moves the object's read/write registration to
  *     the ready set and dispatches events, exactly like the select loop does.
  *
- * FIRST CUT (2026-07-12, groundwork): the generic queue / interval / event
- * dispatch logic mirrors the POSIX version; completion dispatch is by object
- * key.  The overlapped read/write themselves live in the IO-object overlays
- * (ts2IOdescriptor/ts2IOsocket, not yet ported), so the completion path is not
- * yet exercised end-to-end — but the reactor compiles and its structure is the
- * final one.  Direction disambiguation (a completion that is both read & write)
- * will use the per-direction OVERLAPPED once the IO objects carry them.
+ * The overlapped read/write themselves live in the IO-object overlays
+ * (ts2IOdescriptor/ts2IOsocket); completion dispatch is by object key.
+ * Direction disambiguation (a completion that is both read & write) uses the
+ * per-direction OVERLAPPED carried by the IO objects.
  */
 
 /* WIN32_LEAN_AND_MEAN before <windows.h> keeps legacy <winsock.h> out, so
@@ -36,9 +38,6 @@
 #include	"ts2/c++/stdEvent.h"
 #include	"ts2/c++/tsApplication.h"
 #include	"_ts2/c++/tinyState_.h"
-
-INTEGER64
-fwIO::start_time;
 
 /* wake sentinel: PostQueuedCompletionStatus uses this key so loop() can tell a
    wake apart from a real IO completion (whose key is a tinyState object). */
@@ -74,6 +73,7 @@ fwIO::fwIO(sPtr<tsApplication> app)
 
 	announceMaxfd = -1;
 	refio = 0;
+	refio_pins = thNEW(stdQueue<tinyState>,());
 }
 
 
@@ -131,194 +131,6 @@ fwIO::wake()
 /* names kept so the shared registration code paths read the same as POSIX */
 void	fwIO::writePipe()	{ wake(); }
 void	fwIO::readPipe()	{ /* IOCP: wake completions are consumed in loop() */ }
-
-
-/* ---- dump / printf (same as POSIX, minus fd_set maskbits) ---- */
-
-static int
-_ts_io_dump(sPtr<fwIOdata>  dd,sPtr<stdObject>  d2)
-{
-	printf("   %lli",dd->data);
-	return dd->obj->printParent();
-}
-
-void
-fwIO::dump(const char * msg)
-{
-	if ( stdFrameWork::trace_bit & FWTR_RWI )
-		::printf("%s START\n",msg);
-	if ( stdFrameWork::trace_bit & FWTR_READ ) {
-		::printf("   ** READ **\n");
-		read_objs->check(thNULL,_ts_io_dump);
-	}
-	if ( stdFrameWork::trace_bit & FWTR_WRITE ) {
-		::printf("   ** WRITE **\n");
-		write_objs->check(thNULL,_ts_io_dump);
-	}
-	if ( stdFrameWork::trace_bit & FWTR_INTERVAL ) {
-		::printf("   ** INTERVAL **\n");
-		interval_objs->check(thNULL,_ts_io_dump);
-	}
-	if ( stdFrameWork::trace_bit & FWTR_RWI )
-		::printf("%s END\n",msg);
-}
-
-int
-fwIO::printf(sPtr<tinyState>  caller,const char * fmt,...)
-{
-	int ret; va_list arg;
-	va_start(arg,fmt);
-	ret = v_printf(caller,fmt,arg);
-	va_end(arg);
-	return ret;
-}
-int	fwIO::v_printf(sPtr<tinyState>  caller,const char * fmt,va_list arg)	{ return v_printf(caller,fmt,arg); }
-int
-fwIO::printf_err(sPtr<tinyState>  caller,const char * fmt,...)
-{
-	int ret; va_list arg;
-	va_start(arg,fmt);
-	ret = v_printf(caller,fmt,arg);
-	va_end(arg);
-	return ret;
-}
-int	fwIO::v_printf_err(sPtr<tinyState>  caller,const char * fmt,va_list arg)	{ return v_printf(caller,fmt,arg); }
-
-
-/* ---- registration API (generic; identical to POSIX except wake()) ----
- * On MinGW the second arg is an opaque key (the object associates its HANDLE
- * with the port keyed by itself); there is no FD_SETSIZE bound. */
-
-int
-fwIO::read(sPtr<tinyState>  THIS,int fd,int opt)
-{
-sPtr<fwIOdata>  dd;
-sThreadMutexHandle __hdr(mu);
-	dd = thNEW( fwIOdata,());
-	dd->type = TSE_RETURN;
-	dd->seq  = tinyState::getSeq();
-	dd->obj  = THIS;
-	dd->data = fd;
-	dd->opt  = opt;
-	this->read_objs->ins(fd,dd);
-	wake();
-	return dd->seq;
-}
-
-int
-fwIO::write(sPtr<tinyState>  THIS,int fd,int opt)
-{
-sPtr<fwIOdata>  dd;
-sThreadMutexHandle __hdr(mu);
-	dd = thNEW( fwIOdata,());
-	dd->type = TSE_RETURN;
-	dd->seq  = tinyState::getSeq();
-	dd->obj  = THIS;
-	dd->data = fd;
-	dd->opt  = opt;
-	this->write_objs->ins(fd,dd);
-	wake();
-	return dd->seq;
-}
-
-int
-fwIO::wait(sPtr<tinyState>  THIS,INTEGER64 tm,int type)
-{
-sPtr<fwIOdata>  dd;
-sThreadMutexHandle __hdr(mu);
-	dd = thNEW( fwIOdata,());
-	dd->type = type;
-	dd->seq  = tinyState::getSeq();
-	dd->data = stdInterval::now() + tm;
-	dd->obj  = THIS;
-	this->interval_objs->ins(dd->data,dd);
-	wake();
-	return dd->seq;
-}
-
-int
-fwIO::is_read(sPtr<tinyState> THIS)
-{
-sThreadMutexHandle __hdr(mu);
-	return this->read_objs->check([THIS](sPtr<fwIOdata> dd){
-			return dd->obj == THIS ? 1 : 0;
-		}).is_notNull();
-}
-int
-fwIO::is_write(sPtr<tinyState> THIS)
-{
-sThreadMutexHandle __hdr(mu);
-	return this->write_objs->check([THIS](sPtr<fwIOdata> dd){
-			return dd->obj == THIS ? 1 : 0;
-		}).is_notNull();
-}
-int
-fwIO::is_wait(sPtr<tinyState> THIS)
-{
-sThreadMutexHandle __hdr(mu);
-	return this->interval_objs->check([THIS](sPtr<fwIOdata> dd){
-			return dd->obj == THIS ? 1 : 0;
-		}).is_notNull();
-}
-
-static int
-_ts_io_detach(sPtr<fwIOdata>  dd,sPtr<stdObject>  d2)
-{
-sPtr<tinyState>  THIS = sPtr<tinyState>::d_cast(d2);
-	return dd->obj == THIS ? 1 : 0;
-}
-int
-fwIO::detach(sPtr<tinyState>  THIS,int flags)
-{
-sThreadMutexHandle __hdr(mu);
-	if ( flags & FWTR_READ )
-		for ( ; this->read_objs->del(THIS,_ts_io_detach).is_notNull() ; );
-	if ( flags & FWTR_WRITE )
-		for ( ; this->write_objs->del(THIS,_ts_io_detach).is_notNull() ; );
-	if ( flags & FWTR_INTERVAL )
-		for ( ; this->interval_objs->del(THIS,_ts_io_detach).is_notNull() ; );
-	wake();
-	return 0;
-}
-
-void	fwIO::addRefio()	{ sThreadMutexHandle __hdr(mu); refio ++; }
-void	fwIO::delRefio()	{ sThreadMutexHandle __hdr(mu); refio --; wake(); }
-
-static int
-_ts_io_abort(sPtr<fwIOdata>  dd,sPtr<stdObject>  d2)
-{
-sPtr<fwIOdata>  ref;
-	ref = sPtr<fwIOdata>::d_cast(d2);
-	return ref->data == dd->data ? 1 : 0;
-}
-void
-fwIO::abort(int fd)
-{
-sPtr<fwIOdata>  d, ret;
-	d = thNEW( fwIOdata,(fd));
-	for ( ; ; ) {
-		{
-		sThreadMutexHandle __hdr(mu);
-			if ( !this->read_objs.is_notNull() )
-				break;
-			ret = this->read_objs->del(d,_ts_io_abort);
-			if ( ret == thNULL )
-				break;
-		}
-		ret->obj->eventHandler(thNEW( stdEvent,(ret->type,ret->obj,ret->seq,-1)));
-	}
-	for ( ; ; ) {
-		{
-		sThreadMutexHandle __hdr(mu);
-			if ( !this->write_objs.is_notNull() )
-				break;
-			ret = this->write_objs->del(d,_ts_io_abort);
-			if ( ret == thNULL )
-				break;
-		}
-		ret->obj->eventHandler(thNEW( stdEvent,(ret->type,ret->obj,ret->seq,-1)));
-	}
-}
 
 
 /* ---- interval helpers (same as POSIX) ---- */

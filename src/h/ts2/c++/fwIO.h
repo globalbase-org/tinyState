@@ -71,6 +71,11 @@ private:
 
 
 	int			refio;
+	/* one sPtr per addRefio(obj) call: keeps the *issuer* alive while it has an
+	   outstanding keep-alive op (a threadpool op holds a raw `this` in its ctx, and
+	   refcount→0 gc's an object with a raw `delete` — no FIN drain — so without this
+	   pin an issuer freed mid-op would be a UAF).  delRefio(obj) drops one entry. */
+	sPtr<stdQueue<tinyState> >	refio_pins;
 public:
 	fwIO(sPtr<tsApplication> app);
 	~fwIO();
@@ -91,8 +96,11 @@ public:
 #ifdef _WIN32
 	void * port();   // IOCP HANDLE, for IO objects to associate their HANDLE/SOCKET
 #endif
-	void addRefio();
-	void delRefio();
+	/* obj (optional): the issuer to pin alive until its matching delRefio.  Callers
+	   whose object lifetime is already guaranteed (tsThread, ts2System with its own
+	   wait_pin) pass nothing. */
+	void addRefio(sPtr<tinyState> obj = thNULL);
+	void delRefio(sPtr<tinyState> obj = thNULL);
 
 	void dump(const char * msg);
 #ifndef _WIN32

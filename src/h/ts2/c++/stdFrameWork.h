@@ -26,8 +26,8 @@ public:
 	virtual void dump(const char *msg) = 0;
 	virtual void announce(int  msg) {}
 	virtual int announce() { return 0;}
-	virtual void addRefio() {};
-	virtual void delRefio() {};
+	virtual void addRefio(sPtr<tinyState> obj = thNULL) {};
+	virtual void delRefio(sPtr<tinyState> obj = thNULL) {};
 
 	static 	const char * trace_all;
 	static 	int8_t trace_bit;

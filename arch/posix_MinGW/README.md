@@ -15,7 +15,7 @@ CMake の overlay ループはこのレイヤを安全に skip する。
 | ファイル | 内容 | 出典 |
 |---|---|---|
 | `classes/ts2/c++/tsSignalCore.cpp` | no-op stub (Windows にシグナル無し) | §5.7 |
-| `classes/ts2/c++/fwIO.cpp` | 案 B: WSAEventSelect + WaitForMultipleObjects + CreateEvent 自前 wake | §5.3〜5.5 |
+| `classes/ts2/c++/fwIOarch.cpp` | IOCP backend (arch 固有半分。共通部は `src/classes/ts2/c++/fwIO.cpp`) | §5.3〜5.5 |
 | `classes/ts2/c++/ts2System.cpp` | fork/execvp → CreateProcess | §5.8 |
 | `classes/ts2/c++/sObject.cpp` | openpty → 機能無効化 or ConPTY | §7 |
 | `classes/ts2/c++/co_tsThreadKill.cpp` | pthread_kill → CancelSynchronousIo | §5.6 |

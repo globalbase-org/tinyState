@@ -31,9 +31,9 @@ s2iostd_wrap(sPtr<tinyState> parent,DWORD which)
 HANDLE h = GetStdHandle(which);
 	if ( h == INVALID_HANDLE_VALUE || h == NULL )
 		return thNULL;
-	if ( GetFileType(h) == FILE_TYPE_CHAR )
+	if ( GetFileType(h) == FILE_TYPE_CHAR )		/* console / serial */
 		return thNEW(ts2IOwinConsole,(parent,h));
-	return thNEW(ts2IOdescriptor,(parent,h));
+	return thNEW(ts2IOdescriptor,(parent,h));	/* pipe / disk: base internal-buffer path */
 }
 
 int

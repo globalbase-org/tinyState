@@ -20,6 +20,35 @@ TS_BEGIN_IMPLEMENT
  * / Abstract base for byte-stream I/O (fd, socket, PTY, …) in the tinyState framework.
  * Concrete implementations are `ts2IOdescriptor`, `ts2IOsocket`, etc.
  *
+ * @par ライフサイクル契約 / Lifecycle contract
+ * - **未使用なら自動回収される。** 構築後 read / write / read_c / write_c / read_s /
+ *   write_s / seek を一度も呼ばなければ、この I/O はリアクタ (`fwIO`) に何も登録せず、
+ *   自分をどこにも pin しない。よって所有者が sPtr を手放した時点で自動的に回収される。
+ *   → `ts2System` が返す `rfd` / `wfd` / `efd` のうち<b>使わないストリームはそのまま無視してよい</b>。
+ * - **一度でも I/O を呼んだら、最後に必ず `destroy()` する。** read / write は EAGAIN 時に
+ *   呼び出し元 tinyState (POSIX) または自分自身 (MinGW: 発行済み overlapped の keep-alive pin)
+ *   をリアクタに繋いで yield する。<b>着信が無いまま放置すると完了イベントが永久に来ないため、
+ *   その I/O は回収されず残り続ける</b> (呼び出し元 tinyState もリアクタのキューに繋がれたまま
+ *   なので、そちらも自動回収されない)。`destroy()` は保留中 I/O をキャンセルし、リアクタから
+ *   detach し、fd/HANDLE を close するので、これで初めて全体が確実に回収される。
+ * - これはフレームワークの設計方針: 呼び出し元の消滅を監視して自動回収する方式は取らない
+ *   (read/write ごとに監視コストが乗り、かつ parked な呼び出し元自身がリアクタに pin される)。
+ *   <b>明示的な `destroy()` によるライフサイクル制御はプログラマの責任</b>とする。
+ * / - **Unused streams self-collect.** If you never call read/write/read_c/write_c/
+ *   read_s/write_s/seek after construction, the stream registers nothing with the
+ *   reactor (`fwIO`) and pins nothing, so it is reclaimed as soon as its owner drops
+ *   its sPtr. Hence any of the `rfd`/`wfd`/`efd` streams returned by `ts2System` that
+ *   you do not use may simply be ignored.
+ * - **Once you call any I/O, you MUST `destroy()` it at the end.** On EAGAIN, read/write
+ *   park the calling tinyState (POSIX) or the stream itself (MinGW: keep-alive pin for the
+ *   posted overlapped) in the reactor and yield. If abandoned with no incoming data the
+ *   completion never arrives, so the I/O — and the parked caller, itself still linked in
+ *   the reactor's queue — lingers forever. `destroy()` cancels the pending I/O, detaches
+ *   from the reactor and closes the fd/HANDLE; only then is everything reclaimed.
+ * - By design the framework does NOT auto-reclaim on caller death (it would add per-call
+ *   watch overhead, and the parked caller is itself pinned in the reactor): explicit
+ *   lifecycle control via `destroy()` is the programmer's responsibility.
+ *
  * **read_c / write_c の yield-resume セマンティクス:**
  *
  * `read_c` / `write_c` は sPicoState (`ps_read_c` / `ps_write_c`) で部分進捗を保持し、
@@ -250,15 +279,11 @@ ts2IO_::get_divisible()
 int
 ts2IO_::write_div(void * buf,int length)
 {
-	for ( ; ; ) {
-		try {
-			return write(buf,length);
-		} catch ( sException & ev ) {
-			if ( length <= 1 )
-				throw;
-			length /= 2;
-		}
-	}
+	/* Passthrough.  write() is partial-immediate on every backend (POSIX ::write,
+	   MinGW internal ring), so "shrink and retry on sException" is obsolete — and
+	   harmful: each retry re-registers the caller.  Divisible mode is now a no-op;
+	   write_c loops on the partial return. */
+	return write(buf,length);
 }
 
 int

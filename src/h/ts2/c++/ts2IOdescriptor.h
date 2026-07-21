@@ -7,10 +7,13 @@
 #include	"_ts2/c++/ts2IOdescriptor_pb.h"
 
 #ifdef _WIN32
-/* process-unique fwIO/IOCP completion key from the same counter as the
-   per-descriptor fdid, so non-descriptor users (ts2System child-exit) can't
-   collide with a live descriptor registration.  Windows-port design memo §E. */
+/* process-unique fwIO/IOCP completion-key allocator, shared by every fwIO user
+   that registers with the completion port (ts2IOsockServer accept, ts2System
+   child-exit) so their keys can't collide.  Windows-port design memo §E. */
 int	ts2io_alloc_key();
+/* internal ring buffer for the base threadpool-I/O read/write path;
+   defined in ts2IOdescriptor.cpp, held by pointer so this header stays light. */
+class ts2io_ring;
 #endif
 
 #endif

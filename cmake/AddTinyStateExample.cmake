@@ -30,8 +30,15 @@ function(add_tinystate_example)
     if(_abs MATCHES "/classes/")
       string(REPLACE "/" "_" _stamp_name ${_abs})
       set(_stamp ${_stamp_dir}/${_stamp_name}.t)
+      # Declare tscpp2's generated headers as real OUTPUTs (not just the stamp) so a
+      # base-class edit rebuilds dependent subclass objects in ONE incremental pass
+      # (same fix / rationale as AddTinyStateLibrary.cmake).  tscpp2 writes
+      # <baseheader>/_ts2/c++/<basename>_{,pb}.h.
+      get_filename_component(_gen_base ${_abs} NAME_WLE)
+      set(_gen_priv ${CMAKE_CURRENT_BINARY_DIR}/_ts2/c++/${_gen_base}_.h)
+      set(_gen_pub  ${CMAKE_CURRENT_BINARY_DIR}/_ts2/c++/${_gen_base}_pb.h)
       add_custom_command(
-        OUTPUT ${_stamp}
+        OUTPUT ${_stamp} ${_gen_priv} ${_gen_pub}
         COMMAND ${TINYSTATE_TSCPP2} file ${_abs}
                 --baseheader=${CMAKE_CURRENT_BINARY_DIR}
                 --header=_ts2

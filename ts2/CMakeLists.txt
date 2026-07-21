@@ -21,6 +21,7 @@ set(TS2_SOURCES
   classes/ts2/c++/tsApplication.cpp
   classes/ts2/c++/stdMutex.cpp
   classes/ts2/c++/ts2IOraw.cpp
+  classes/ts2/c++/fwIO.cpp
   classes/ts2/c++/sBufferHandle.cpp
   classes/ts2/c++/stdEventHandle.cpp
   classes/ts2/c++/tinyState.cpp
@@ -51,7 +52,7 @@ set(TS2_SOURCES
 
 set(TS2_ARCH_SOURCES
   classes/ts2/c++/tsSignalCore.cpp
-  classes/ts2/c++/fwIO.cpp
+  classes/ts2/c++/fwIOarch.cpp
   classes/ts2/c++/ts2IOdescriptor.cpp
   classes/ts2/c++/ts2IOsocket.cpp
   classes/ts2/c++/ts2System.cpp
