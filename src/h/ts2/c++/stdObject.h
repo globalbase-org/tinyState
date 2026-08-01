@@ -42,6 +42,11 @@ public:
 
 	static void start();
 	static void finish();
+	/** @brief GC が安定（保留中の delete / refEvent キューが空）かを返す。
+	 *  / True when the GC has no pending work at the root bucket: no ref==0 objects
+	 *  queued for delete and no refEvent (auto-teardown) callbacks pending.  Used by
+	 *  tsThread teardown to know refEvent can no longer fire before it frees the pool. */
+	static int is_stable();
 protected:
 	virtual void refEvent() {};
 	void nRefEvent(int obs);

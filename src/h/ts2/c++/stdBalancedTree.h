@@ -144,18 +144,20 @@ public:
 	sPtr<stdBalancedTreeObject_> ret = stdBalancedTree_::search(inp);
 		if ( ret == thNULL )
 			return thNULL;
-		return sPtr<__TYPE1>::dcast(ret->obj);
+		return sPtr<__TYPE1>::d_cast(ret->obj);
 	}
 	virtual sPtr<__TYPE1> ins(__TYPE2 cond,sPtr<__TYPE1> obj) {
 	sPtr<stdBalancedTreeObject_> ret;
-		ret = stdBalancedTree_::ins(thNEW( stdBalancedTreeObject<__TYPE2 COMMA __TYPE1>,(obj)));
+	typedef stdBalancedTreeObject<__TYPE2,__TYPE1> __bto;
+		ret = stdBalancedTree_::ins(thNEW(__bto,(obj)));
 		if ( ret == thNULL )
 			return thNULL;
 		return dynamic_cast<__TYPE1*>(ret->obj);
 	}
 	virtual sPtr<__TYPE1> del(__TYPE2 cond,sPtr<__TYPE1> obj=0) {
 	sPtr<stdBalancedTreeObject_> ret;
-		ret = stdBalancedTree_::del(thNEW( stdBalancedTreeObject<__TYPE2 COMMA __TYPE1>,(obj)));
+	typedef stdBalancedTreeObject<__TYPE2,__TYPE1> __bto;
+		ret = stdBalancedTree_::del(thNEW(__bto,(obj)));
 		if ( ret == thNULL )
 			return thNULL;
 		return sPtr<__TYPE1>::d_cast(ret->obj);
@@ -204,14 +206,16 @@ public:
 	}
 	virtual sPtr<__TYPE1> ins(__TYPE2 cond,sPtr<__TYPE1> obj) {
 	sPtr<stdBalancedTreeObject_> ret;
-		ret = stdBalancedTree_::ins(thNEW( stdBalancedTreeObject<__TYPE2 COMMA __TYPE1>,(obj)));
+	typedef stdBalancedTreeObject<__TYPE2,__TYPE1> __bto;
+		ret = stdBalancedTree_::ins(thNEW(__bto,(obj)));
 		if ( ret == thNULL )
 			return thNULL;
 		return sPtr<__TYPE1>::d_cast(ret->obj);
 	}
 	virtual sPtr<stdQueue<__TYPE1> > del(__TYPE2 cond,sPtr<__TYPE1> obj=thNULL) {
 	sPtr<stdBalancedTreeObject_> ret;
-		ret = stdBalancedTree_::del(thNEW( stdBalancedTreeObject<__TYPE2 COMMA __TYPE1>,(obj)));
+	typedef stdBalancedTreeObject<__TYPE2,__TYPE1> __bto;
+		ret = stdBalancedTree_::del(thNEW(__bto,(obj)));
 		if ( ret == thNULL )
 			return thNULL;
 	sPtr<stdQueue<__TYPE1> > q;

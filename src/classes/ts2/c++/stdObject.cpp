@@ -222,6 +222,20 @@ stdObject::getref()
 }
 
 
+/* GC is "stable" when the root bucket has nothing pending: no ref==0 object queued
+   for delete (refList), no propagated child work (refFlags), and no refEvent /
+   auto-teardown callback queued (refEventHead).  This mirrors the gc_thread idle
+   condition (refList[0]==0 && refFlags[0]==0) plus the refEvent queue.  tsThread
+   teardown polls this so it only frees the worker pool once no refEvent can still
+   fire and re-schedule a state onto it. */
+int
+stdObject::is_stable()
+{
+doLOCK_ID(0);
+	return ( refList[0] == 0 && refFlags[0] == 0 && refEventHead[0] == 0 );
+}
+
+
 
 
 int

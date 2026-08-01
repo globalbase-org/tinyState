@@ -288,7 +288,16 @@ tinyState_::~tinyState_()
 void
 tinyState_::refEvent()
 {
-	if ( getref() == 0 ) {
+	/* refEvent() is dispatched from the GC while a relref on the *interface* is in
+	   progress: the drop watch is armed on the interface (inherit(): ifp->_nRefEvent(0)),
+	   and relref() queues the object to the refEvent list WITHOUT decrementing (it defers
+	   the decrement until after this callback).  So at this point ifp->getref() still
+	   includes the reference now being released — "no external holder remains after this
+	   release" is ifp->getref()==1 (the last handle, about to go), NOT ==0 (unreachable
+	   here) and NOT the impl's getref() (which stays pinned by e.g. fwIO I/O registration
+	   while I/O is live).  Detecting it here lets an object auto-start teardown once its
+	   last public handle is dropped. */
+	if ( ifp->getref() == 1 ) {
 		this->ref_destroy_flag = 1;
 	sPtr<stdEvent>  ev;
 		ev = thNEW( stdEvent,(TSE_INVOKE,ifThis,(INTEGER64)0));

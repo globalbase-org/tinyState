@@ -659,7 +659,29 @@ INTEGER64 age;
 }
 
 
+/* Teardown must not free the worker pool while a refEvent (auto-teardown) can still
+   fire and re-schedule a C_THR state onto it (that ins()es into `ready` and would
+   NULL-deref once we drop it).  So first drain to a point where the pool is empty
+   AND the GC is stable (no pending delete / refEvent), polling every 1ms since
+   is_stable() offers no callback; only then spin the workers down and free.
+   A refEvent arriving mid-drain simply re-fills ready/run or unsettles the GC, so
+   the condition fails and we keep waiting until it truly converges. */
 TS_STATE(FIN_START)
+{
+	timer.start(ifThis,1000);		/* 1ms poll */
+	return rDO|FIN_STABLE_WAIT;
+}
+TS_STATE(FIN_STABLE_WAIT)
+{
+	if ( ready->count == 0 && run->count == 0 && stdObject::is_stable() ) {
+		timer.stop(ifThis);
+		return rDO|FIN_DRAINED;
+	}
+	if ( timer.is_expire(ifThis) )
+		timer.start(ifThis,1000);
+	return 0;
+}
+TS_STATE(FIN_DRAINED)
 {
 	runThreads(0);
 	timer.start(ifThis,1000*1000);

@@ -50,10 +50,10 @@ public:
 
 	sArray(int len): leng(len), cap(len),
 					ary(new (__FILE__,__LINE__)  __TYPE[len]()),
-					expand(1), __file(__FILE__), __line(__LINE__) {
+					__file(__FILE__), __line(__LINE__), expand(1) {
 	}
-	sArray(): leng(0), cap(0), ary(0), expand(1),
-			__file(__FILE__), __line(__LINE__) {
+	sArray(): leng(0), cap(0), ary(0),
+			__file(__FILE__), __line(__LINE__), expand(1) {
 	}
 
 	/** @brief コピーコンストラクタ禁止 (浅いコピーによる dangling を防ぐ)。/ Deleted to prevent dangling from shallow copy. */

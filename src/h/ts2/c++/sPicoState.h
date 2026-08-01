@@ -19,11 +19,16 @@
 		__y			\
 		}			\
 	}
+/* The goto label __##__x is only reached when a PS_GOTO(__x) targets it; a
+   state that is never PS_GOTO'd leaves the label unused, which is inherent to
+   how state machines are written.  Mark it __attribute__((unused)) so
+   -Wunused-label (on under -Wall for clang) stays quiet; harmless when the
+   label IS used. */
 #define PS_STATE(__x)	\
 			if ( traceFlag )					\
 				::printf("%s <<< %i\n",traceFlag,__state);	\
 		case __x:							\
-		__##__x:							\
+		__##__x: __attribute__((unused));				\
 			__state = __x;						\
 			if ( traceFlag )					\
 				::printf("%s     %i >>>\n",traceFlag,__state);

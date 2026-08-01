@@ -94,7 +94,6 @@ void operator delete[](void * pv)
 		throw();
 #endif
 
-#define COMMA	,
 #define thNEW(__type,__arg)	(sPtr<__type>(new (__FILE__,__LINE__) __type __arg,1))
 
 
