@@ -34,6 +34,14 @@ if(GIT_FOUND AND EXISTS ${PROJECT_SOURCE_DIR}/.git)
 endif()
 message(STATUS "tinyState ${PROJECT_VERSION} (${TS_REVISION})")
 
+# ---- build options ----------------------------------------------------------
+# 静的ライブラリを PIC (-fPIC) でビルドする。ライブラリの形態 (STATIC) は
+# 変わらないが、consumer が libtinyState2.a を共有ライブラリ (dlopen される
+# プラグイン/モジュール等) へ埋め込めるようになる。非 PIC だと ELF 上で
+# R_X86_64_32/TPOFF32 の再配置が残り、-shared リンクが失敗する。
+# x86-64 での実行時コストは実質無視できるため既定 ON。
+option(TINYSTATE_BUILD_PIC "Build tinyState libraries as position-independent code" ON)
+
 if ( APPLE )
   set(CMAKE_OBJCXX_COMPILER clang++)
   enable_language(OBJCXX)

@@ -308,7 +308,19 @@ TS_STATE(FIN_TS_APPLICATION_WAIT2)
 		restart_flag = 0;
 		return rDO|INI_START;
 	}
-  	stdObject::finish();
-        return rDO|FIN_TINYSTATE_START;
+	/* appMtx を離してから gc_thread の終了を待つ。ディスパッチ(eventHandler)は非 C_THR
+	 * 状態を appMtx 保持のまま連鎖実行するため、この状態も appMtx を握ったまま入る。だが
+	 * gc_thread は idle 化した dying object の refEvent を dispatch する際 eventHandler()→
+	 * appMtxLock() で *同じ* appMtx を要求する。appMtx を握ったまま finish()(=gc_thread の
+	 * 終了待ち)に入ると、gc は appMtx を取れず gc(0) の中で詰まり、作業キューが空にならず
+	 * finish_flag も読まれず両者永眠する(ロック順序逆転デッドロック。実アプリの soak
+	 * テストで 1〜3% 再現)。finish() は appMtx 非保持で呼ぶ(CLAUDE.md 鉄則3)。すぐ上の
+	 * FIN_THREAD_ROOT_LOOP が fwClass->loop を回すのと同じ sThreadMutexHandleRelease で
+	 * appMtx を一時解放し、スコープ離脱で再取得する(mtxLock_flag は保持のまま=整合)。 */
+	{
+	sThreadMutexHandleRelease __hdr(mtx);
+		stdObject::finish();
+	}
+	return rDO|FIN_TINYSTATE_START;
 }
 

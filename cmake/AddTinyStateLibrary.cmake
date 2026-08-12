@@ -76,6 +76,13 @@ function(add_tinystate_library)
 
   add_library(${TS_NAME} STATIC)
 
+  # PIC ビルド (既定 ON)。静的ライブラリのままだが、consumer が .a を
+  # 共有ライブラリ (dlopen されるモジュール等) へ埋め込めるようにする。
+  # ELF 以外 (PE/COFF) では no-op。
+  set_target_properties(${TS_NAME} PROPERTIES
+    POSITION_INDEPENDENT_CODE ${TINYSTATE_BUILD_PIC}
+  )
+
   add_dependencies(${TS_NAME} ${codegen_target})
 
   # 他ライブラリの codegen 出力 (生成ヘッダ等) に依存する場合
