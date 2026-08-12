@@ -72,6 +72,48 @@ TS_STATE(ACT_W2)    { pipe->wend();          return rDO|ACT_NEXT; }
 
 ルール: <b>イベント検出状態は検出して `rDO` 遷移するだけ。実 I/O は ev 非依存の専用状態で「1 状態 = read_c/write_record 1 回」</b>。yield 再走はその 1 回を呼び直すだけになり、`ts2IO` 側の sPicoState が安全に再開する。読み書きバッファはメンバにする(stack ローカルは再走で別アドレス化)。詳細・背景は [docs/GOTCHAS.md](docs/GOTCHAS.md) §7/§9。
 
+#### 5-1. `rDO` で繋いだ先の状態は `ev` を引き継いでいる
+
+`rDO` は「新しいイベントを待たずにその場で次の状態を実行する」ので、`ev` は<b>チェーンの先頭で受け取ったイベントのまま</b>。したがって「型だけ」でイベントを判定する分岐は、意図しない状態で成立する。
+
+```cpp
+// ✗ タイマ待ちの TSE_TIMER が rDO チェーンの先まで運ばれ、deadline が即発火する
+TS_STATE(ACT_TICK)  { if (ev->type!=TSE_TIMER) return 0;  return rDO|ACT_PREP; }
+TS_STATE(ACT_PREP)  { stdInterval::wait(ifThis,US,TSE_TIMER); return rDO|ACT_RECV; }
+TS_STATE(ACT_RECV)  {
+    if ( ev->type==TSE_TIMER )    return rDO|ACT_TIMEOUT;   // ← 初回入場で即成立
+    io->read_c(...);
+}
+// ✓ 用途ごとに別のイベント型を使い、さらに実時刻でも裏を取る
+TS_STATE(ACT_PREP)  { deadline = stdInterval::now()+US;
+                      stdInterval::wait(ifThis,US,TSE_TIMER2); return rDO|ACT_RECV; }
+TS_STATE(ACT_RECV)  {
+    if ( ev->type==TSE_TIMER2 && stdInterval::now()>=deadline ) return rDO|ACT_TIMEOUT;
+    io->read_c(...);
+}
+```
+
+タイマ用のイベント型は `TSE_TIMER` / `TSE_TIMER2` / `TSE_TIMER3` の 3 種があるので、<b>ポーリング用と締切用で型を分ける</b>。締切のように「時間が来たか」を判定するものは、型に加えて `stdInterval::now()` で実時刻を確認すると `ev` の出どころに依存しなくなる。
+
+#### 5-2. 複数の子から届くイベントを「数えて」待たない
+
+N 個の子の完了を `if (++ready < N) return 0;` で数えるコードは、<b>子がほぼ同時に終わると状態関数の再走が 1 回にまとまり</b>、カウンタが N に届かないまま永久 yield する (数%の頻度で刺さる)。イベント数ではなく<b>相手の状態をポーリングする</b>。
+
+```cpp
+// ✗ 2 つの子から TSE_WAKEUP がちょうど 2 回来る前提
+TS_STATE(ACT_WAIT) { if (ev->type!=TSE_WAKEUP) return 0; if (++ready<2) return 0; return rDO|ACT_NEXT; }
+// ✓ 状態を見る (C_TEST は「相手が死んだか」以外の進捗判定にも使える)
+TS_STATE(ACT_WAIT) {
+    if ( C_TEST(a->tinyState::state(),C_INI) || C_TEST(b->tinyState::state(),C_INI) ) {
+        stdInterval::wait(ifThis,1000,TSE_TIMER);
+        return ACT_WAIT_TICK;                    // 1ms 後に再チェック
+    }
+    return rDO|ACT_NEXT;
+}
+```
+
+どうしても待ち合わせが必要なら、<b>待ちには必ず締切を付ける</b> (上の 5-1)。締切のない待ちはハングとして現れ、原因の切り分けにコストがかかる。
+
 ## 禁止リスト
 
 以下は <b>tinyState ストラテジーで書かれたコード内では使わない</b>。
@@ -330,3 +372,5 @@ if ( C_TEST(a->state(), C_ZOM) ) { ... }
 「初心者がよく書く間違いコード」は会話・レビューを通じて随時このファイルに追記していく。現時点での既出例:
 - `child->listen(ifThis, TSE_DESTROY)` を忘れて FIN_START が永久 yield (→ FIN_START セクション参照)
 - 外部から `a->is_destroyed()` で死亡確認しようとする。正しくは `C_TEST(a->state(), C_ZOM)` (→ sPtr セクション参照)
+- `rDO` チェーンの先で `ev->type` だけを見て分岐し、前の状態のイベントで誤って成立する (→ 鉄則 5-1)
+- N 個の子の完了をイベントの回数で数え、同時完了で 1 回にまとまって永久 yield (→ 鉄則 5-2)

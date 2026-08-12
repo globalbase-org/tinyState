@@ -163,6 +163,20 @@ public:
 	 * cancel() の直後は必ず return すること。
 	 */
 	void cancel();
+	/** @brief destroy() override: root を destroy すると全兄弟も cascade destroy する。
+	 *         / destroying the root cascades destroy() to all siblings.
+	 * @details
+	 * root を(cancel() 経由でなく)直接 destroy() すると、兄弟は _next に伝播せず
+	 * 走り続けて孤児化する。この override は root の destroy 時に cancel() と同じく
+	 * 全兄弟を畳んでから base destroy に落ちる。兄弟自身の destroy() は _root != ifThis
+	 * ゆえ cascade 分岐に入らず素直に base へ落ちる(再帰しない)。
+	 *
+	 * ---
+	 *
+	 * Directly destroying the root (not via cancel()) would leave siblings running
+	 * as orphans since _next is not propagated.  This override tears the siblings
+	 * down (as cancel() does) before delegating to the base destroy. */
+	virtual void destroy(int delayFlag=0);
 protected:
 	ts2ParallelFn _fn;
 	unsigned _cancelling:1;
@@ -232,6 +246,24 @@ ts2Parallel_::cancel()
 		p = nxt;
 	}
 	destroy();
+}
+
+void
+ts2Parallel_::destroy(int delayFlag)
+{
+	/* root を直接 destroy() した場合のみ、cancel() と同様に全兄弟を cascade destroy。
+	 * !is_destroyed() ガード + base の destroy_flag で二重 destroy を無害化する。兄弟の
+	 * _root は root を pin するので、兄弟が生きている間 root が refcount=0 で消えることは
+	 * なく、live 兄弟つき root の teardown は必ずこの明示 destroy() を通る。 */
+	if ( _root == ifThis && !is_destroyed() ) {
+		sPtr<ts2Parallel> p = _next;
+		while ( p != thNULL ) {
+			sPtr<ts2Parallel> nxt = p->_next;
+			p->destroy();
+			p = nxt;
+		}
+	}
+	tinyState_::destroy(delayFlag);
 }
 
 
