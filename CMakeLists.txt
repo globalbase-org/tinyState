@@ -42,9 +42,19 @@ message(STATUS "tinyState ${PROJECT_VERSION} (${TS_REVISION})")
 # x86-64 での実行時コストは実質無視できるため既定 ON。
 option(TINYSTATE_BUILD_PIC "Build tinyState libraries as position-independent code" ON)
 
+# 共有ライブラリとしてビルドする。既定は STATIC。SHARED を ON にすると
+# .so (Linux/POSIX) または .dylib (macOS) または .dll (MinGW/Cygwin) が生成される。
+# GMP/MPFR など数値ライブラリは外部依存として .so の DT_NEEDED に記録される。
+# tinyState2 はバージョンロック不要 (内部使用)。tinyState2Math は consumer が
+# GMP/MPFR をランタイムで用意する必要がある (使わなければ不要)。
+option(TINYSTATE_BUILD_SHARED "Build tinyState libraries as shared libraries (default is static)" OFF)
+
 if ( APPLE )
   set(CMAKE_OBJCXX_COMPILER clang++)
   enable_language(OBJCXX)
+  # cDarwin_oc.m / cDarwin_OSX_oc.m (Foundation を叩く darwin_* 実装) は素の
+  # Objective-C。ライブラリ本体に取り込むため OBJC も有効化する。
+  enable_language(OBJC)
 endif()
 
 
@@ -198,6 +208,9 @@ endif()
 # サブライブラリ
 add_subdirectory(ts2)
 add_subdirectory(math2)
+
+# whole-archive テスト (EXCLUDE_FROM_ALL: 明示的にビルド指定時だけ include)
+add_subdirectory(example/whole-archive-test EXCLUDE_FROM_ALL)
 
 # MinGW: TRE オブジェクトを libtinyState2 に取り込む (consumer は追加リンク不要)。
 if(WIN32 AND NOT CYGWIN)

@@ -3,7 +3,7 @@
 function(add_tinystate_library)
   set(options)
   set(oneValueArgs NAME)
-  set(multiValueArgs SOURCES DARWIN_SOURCES ARCH_SOURCES DEPENDS_CODEGEN)
+  set(multiValueArgs SOURCES DARWIN_SOURCES ARCH_SOURCES DEPENDS_CODEGEN LINK_LIBRARIES)
 
   cmake_parse_arguments(TS
     "${options}"
@@ -73,8 +73,14 @@ function(add_tinystate_library)
 	DEPENDS ${STAMPS}
 	)
 
+  # SHARED ビルドか STATIC ビルドかを選択
+  if(TINYSTATE_BUILD_SHARED)
+    set(lib_type SHARED)
+  else()
+    set(lib_type STATIC)
+  endif()
 
-  add_library(${TS_NAME} STATIC)
+  add_library(${TS_NAME} ${lib_type})
 
   # PIC ビルド (既定 ON)。静的ライブラリのままだが、consumer が .a を
   # 共有ライブラリ (dlopen されるモジュール等) へ埋め込めるようにする。
@@ -117,10 +123,27 @@ function(add_tinystate_library)
       ${SRC}/src/h
   )
 
+  # ライブラリリンク（GMP/MPFR など外部ライブラリ）
+  if(TS_LINK_LIBRARIES)
+    target_link_libraries(${TS_NAME} PUBLIC ${TS_LINK_LIBRARIES})
+  endif()
+
   # ライブラリ
-  install(TARGETS ${TS_NAME}
-          ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-  )
+  if(TINYSTATE_BUILD_SHARED)
+    # SHARED: .so/.dylib は LIBRARY、Windows の .dll は RUNTIME、そして PE の
+    # インポートライブラリ (.dll.a) は ARCHIVE として扱われる。ARCHIVE を省くと
+    # Windows で DLL に対してリンクする手段が無くなる (ELF/Mach-O では no-op)。
+    install(TARGETS ${TS_NAME}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+  else()
+    # STATIC: ARCHIVE のみ
+    install(TARGETS ${TS_NAME}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+  endif()
 endfunction()
 
 

@@ -28,7 +28,7 @@ Linux と、Windows の 2 つのツールチェーン（**Cygwin** / **MSYS2 (Mi
 |---|---|
 | `include/` | 共通ヘッダ + OS 依存ヘッダ(arch overlay) + 生成ヘッダ `_ts2/` |
 | `include/std2/tinyState_config.h` | ビルド構成ヘッダ（`TS_VERSION` / `TS_REVISION` 等。→ [BUILD_INTERNAL §8](BUILD_INTERNAL.md)） |
-| `lib/libtinyState2.a`, `libtinyState2Math.a` | 静的ライブラリ |
+| `lib/libtinyState2.a`, `libtinyState2Math.a` | 静的ライブラリ（`TINYSTATE_BUILD_SHARED=ON` なら代わりに `.so` / `.dylib` / `.dll`。→ [§5-1](#5-1-ビルドオプション)） |
 | `bin/tscpp2` ほか | コードジェネレータ (Perl) |
 | `lib/cmake/tinyState/` | `find_package(tinyState)` 用パッケージ設定（版数ファイル込みで `find_package(tinyState 2.0)` の版数指定も可） |
 
@@ -191,6 +191,63 @@ add_tinystate_example(NAME myapp
 `add_tinystate_example` は `SOURCES` のうち `/classes/` を含むパスを tscpp2 で
 コード生成し、残り（`main.cpp` 等）はそのままコンパイルする。コンパイルフラグ
 （`-std=gnu++2a` 等）・include・リンクは `tinyState::tinyState2` から継承される。
+
+---
+
+## 5-1. ビルドオプション
+
+| オプション | 既定 | 内容 |
+|---|---|---|
+| `TINYSTATE_BUILD_PIC` | `ON` | ライブラリを PIC (`-fPIC`) でビルドする。`.a` のままだが、consumer が共有ライブラリ (dlopen されるモジュール等) へ埋め込める。非 PIC だと ELF 上で `R_X86_64_32` / `TPOFF32` の再配置が残り `-shared` リンクが失敗する。x86-64 での実行時コストは実質無視できる |
+| `TINYSTATE_BUILD_SHARED` | `OFF` | ライブラリを共有ライブラリ (`.so` / `.dylib` / `.dll`) としてビルドする。`OFF` なら従来どおり静的 `.a` |
+
+```sh
+cmake -B build -DTINYSTATE_BUILD_SHARED=ON .
+```
+
+### 共有ライブラリビルドの注意
+
+* `libtinyState2Math` は **GMP / MPFR に実リンク**する。静的ビルドではこれらの
+  シンボルは未解決のまま `.a` に残り、アプリ側が解決していた。共有ビルドでは
+  ライブラリ自身が `DT_NEEDED` を持つので、**ビルドマシンに開発パッケージが必要**
+  (Debian: `libgmp-dev` `libmpfr-dev` / Homebrew: `gmp` `mpfr` /
+  MSYS2: `mingw-w64-x86_64-gmp` `mingw-w64-x86_64-mpfr` / Cygwin: `libgmp-devel` `libmpfr-devel`)。
+  ただし **できた `.dylib` / `.so` を使わなければ実行時に GMP/MPFR は要らない**。
+* **`find_package(tinyState)` は現状かならず静的 `.a` を掴む**。`lib/cmake/tinyState/`
+  のパッケージ設定は `STATIC IMPORTED` で `libtinyState2.a` を名指ししているため、
+  共有ライブラリを消費したい場合は今のところリンク指定を自前で書く必要がある。
+  また **共有ビルドだけを install すると `.a` が存在せず `find_package` が壊れる**ので、
+  共有を使う場合も静的ビルドを併せて install しておくこと:
+
+  ```sh
+  cmake -B build-static . && cmake --install build-static --prefix <PREFIX>
+  cmake -B build-shared -DTINYSTATE_BUILD_SHARED=ON . && cmake --install build-shared --prefix <PREFIX>
+  ```
+
+  パッケージ設定から共有版を選べるようにするのは今後の課題。
+* **macOS では universal ビルドにできない**。本プロジェクトは既定で
+  `arm64;x86_64` を作るが、Homebrew の GMP/MPFR は単一アーキテクチャなので
+  x86_64 スライスがリンクできない。共有ビルド時は明示的に単一アーキを指定する:
+
+  ```sh
+  cmake -B build -DTINYSTATE_BUILD_SHARED=ON -DCMAKE_OSX_ARCHITECTURES=arm64 .
+  ```
+
+  静的ビルドはリンクが起きないので従来どおり universal のままでよい。
+
+### whole-archive 検証
+
+`.a` は参照を解決しないため、どの `.o` も引き込まれない限り未定義参照は表に
+出ない。これを検出するターゲットが `example/whole-archive-test` で、ライブラリを
+全取り込み (`--whole-archive` / `-force_load`) して共有ライブラリを作る。
+通常ビルドには含まれないので明示的に指定する:
+
+```sh
+cmake --build build --target whole_archive_test_so
+```
+
+ビルドが通ること自体が検証結果。tinyState 本体を丸ごと共有ライブラリへ
+取り込みたい利用者は、まずこれが通ることを確認するとよい。
 
 ---
 

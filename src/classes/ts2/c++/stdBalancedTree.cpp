@@ -299,4 +299,38 @@ stdBalancedTree_::walk(
 	top->walk(this,c1,cb);
 }
 
+int
+sBalancedTreeCondition::cmp(sBalancedTreeCondition & d)
+{
+	int this_inf = is_infty();
+	int d_inf = d.is_infty();
+	if ( this_inf != 0 || d_inf != 0 ) {
+		if ( this_inf < d_inf )
+			return -1;
+		if ( this_inf > d_inf )
+			return 1;
+		return 0;
+	}
+	return 0;
+}
+
+int
+stdBalancedTreeCallback::callback(
+	sBalancedTreeCondition & c1,
+	sPtr<stdBalancedTreeCallback> cb,
+	sBalancedTreeCondition & c2,
+	sPtr<stdObject> obj)
+{
+	return 0;
+}
+
+int
+stdBalancedTree_::callback(
+	sBalancedTreeCondition & c1,
+	sPtr<stdBalancedTreeCallback> cb,
+	sBalancedTreeCondition & c2,
+	sPtr<stdObject> obj)
+{
+	return 0;
+}
 

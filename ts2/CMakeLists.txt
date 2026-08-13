@@ -80,3 +80,28 @@ add_tinystate_library(
 
   DARWIN_SOURCES
 )
+
+# macOS: stdOSfundamental.cpp が呼ぶ darwin_* の実体は Objective-C 側にある。
+# tinyState のクラスではないので codegen (tscpp2) は通さず、素のソースとして
+# 直接ライブラリへ追加する。これを欠くと .a では「引き込まれないので気付かない」
+# 未解決参照として潜在化し、SHARED ビルドで初めてリンクエラーになる。
+if(APPLE)
+  target_sources(tinyState2 PRIVATE
+    ${ARCH_OVERLAY}/classes/ts2/c++/cDarwin_oc.m
+    ${ARCH_OVERLAY}/classes/ts2/c++/cDarwin_OSX_oc.m
+  )
+  target_link_libraries(tinyState2 PUBLIC "-framework Foundation")
+endif()
+
+# プラットフォーム依存のリンク要件。cmake/tinyStateConfig.cmake が install 済み
+# パッケージの imported target に載せているものと同じ内容を、ビルドツリーの
+# ターゲットにも宣言する。これが無いと in-tree の SHARED ビルドや whole-archive
+# リンクで winsock 等が引けない (STATIC ではリンクが起きないので露見しない)。
+if(WIN32 AND NOT CYGWIN)
+  target_link_libraries(tinyState2 PUBLIC ws2_32 mswsock bcrypt)
+else()
+  target_link_libraries(tinyState2 PUBLIC Threads::Threads m)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(tinyState2 PUBLIC rt dl)
+  endif()
+endif()

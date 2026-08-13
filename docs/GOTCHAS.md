@@ -472,3 +472,54 @@ codegen 自体は通る(状態ゼロの派生も可)。だが基底 `Parent` が
 
 cgal-processor `pigfCgalpAgent`(基底 `pigfAgent` の ts2System / ptsWirePipe / ts2Parallel /
 reader / ts2IO メンバ用に完全型 include)。
+
+---
+
+## 12. 静的ライブラリは未定義参照を隠す — 「使われないから気付かない」バグ
+
+### 症状
+
+`.a` を配ってきた間は誰も困らないのに、共有ライブラリを作ろうとした瞬間、あるいは
+利用者が `--whole-archive` で全取り込みしようとした瞬間に、大量の未定義参照が出る。
+
+```
+libtinyState2.a(stdBalancedTree.cpp.o):
+    undefined reference to `stdBalancedTree_::callback(...)'
+    undefined reference to `vtable for sBalancedTreeCondition'
+```
+
+### 原因
+
+`.a` は `.o` を束ねた書庫にすぎず、リンカは<b>未解決シンボルを解決できるメンバだけ</b>を
+引き出す。誰も使っていない `.o` は取り込まれず、その中の未定義参照は永久に表に出ない。
+結果として次のような欠陥が長期間潜在化する:
+
+* 宣言だけあって定義の無い `virtual`。特に<b>key function</b>(最初の非 inline virtual)が
+  未定義だと、そのクラスの vtable がどの翻訳単位にも出力されない。
+* 実装ファイルがビルド対象に入っていない(例: Objective-C の `.m` を
+  `target_sources` に足し忘れる)。
+* ライブラリ間の実リンク依存やプラットフォーム依存(winsock / pthread)の宣言漏れ。
+
+同じ理由で<b>テンプレートが一度も実体化されない</b>と、その中の誤字や型エラーも
+コンパイルされないまま残る。
+
+### 対処
+
+<b>ライブラリを全取り込みして共有ライブラリを作るビルドを、検証として回す。</b>
+未解決参照がリンクエラーになるので、上記すべてが一度に炙り出せる。
+
+```sh
+cmake --build build --target whole_archive_test_so
+```
+
+ELF の `.so` は既定で未定義シンボルを許すので `-Wl,--no-undefined` が要る。
+macOS の `.dylib` は既定でエラーなので不要。この差のため、<b>Linux では通るが
+macOS で落ちる</b>という形で露見することがある。
+
+### 実例
+
+tinyState v2.0.0-rc8 で、この検証を入れた結果 4 件が同時に見つかった:
+`stdBalancedTree` の未定義 virtual 3 つ、macOS の `darwin_*` 実装が
+ライブラリ未収録、`tinyState2Math` → `tinyState2` のリンク依存未宣言、
+in-tree ターゲットの winsock/pthread 未宣言。いずれも `.a` 利用者には
+無害だったため、長期間発覚していなかった。
