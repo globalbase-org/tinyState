@@ -213,18 +213,6 @@ cmake -B build -DTINYSTATE_BUILD_SHARED=ON .
   (Debian: `libgmp-dev` `libmpfr-dev` / Homebrew: `gmp` `mpfr` /
   MSYS2: `mingw-w64-x86_64-gmp` `mingw-w64-x86_64-mpfr` / Cygwin: `libgmp-devel` `libmpfr-devel`)。
   ただし **できた `.dylib` / `.so` を使わなければ実行時に GMP/MPFR は要らない**。
-* **`find_package(tinyState)` は現状かならず静的 `.a` を掴む**。`lib/cmake/tinyState/`
-  のパッケージ設定は `STATIC IMPORTED` で `libtinyState2.a` を名指ししているため、
-  共有ライブラリを消費したい場合は今のところリンク指定を自前で書く必要がある。
-  また **共有ビルドだけを install すると `.a` が存在せず `find_package` が壊れる**ので、
-  共有を使う場合も静的ビルドを併せて install しておくこと:
-
-  ```sh
-  cmake -B build-static . && cmake --install build-static --prefix <PREFIX>
-  cmake -B build-shared -DTINYSTATE_BUILD_SHARED=ON . && cmake --install build-shared --prefix <PREFIX>
-  ```
-
-  パッケージ設定から共有版を選べるようにするのは今後の課題。
 * **macOS では universal ビルドにできない**。本プロジェクトは既定で
   `arm64;x86_64` を作るが、Homebrew の GMP/MPFR は単一アーキテクチャなので
   x86_64 スライスがリンクできない。共有ビルド時は明示的に単一アーキを指定する:
@@ -234,6 +222,27 @@ cmake -B build -DTINYSTATE_BUILD_SHARED=ON .
   ```
 
   静的ビルドはリンクが起きないので従来どおり universal のままでよい。
+
+### `find_package` から共有版を選ぶ
+
+パッケージ設定は **実際に install されているものを見て**ターゲットを決めるので、
+「静的だけ」「共有だけ」「両方」のどの install でも `find_package(tinyState)` は成立する。
+
+| ターゲット | 指すもの |
+|---|---|
+| `tinyState::tinyState2` | 静的があれば静的、無ければ共有（**既定はこれまでどおり静的**） |
+| `tinyState::tinyState2Shared` | 共有（共有が install されている場合のみ定義される） |
+| `tinyState::tinyState2Math` / `…MathShared` | 同上 |
+
+両方 install した prefix で共有版を明示的に使いたい場合:
+
+```cmake
+find_package(tinyState REQUIRED)
+target_link_libraries(myapp PRIVATE tinyState::tinyState2Shared)
+```
+
+プロセス内で tinyState の実体と静的状態を確実に 1 組にしたい構成（複数の `.so` が
+それぞれ tinyState を内包すると実体が複数になる）では、共有版を選ぶ意味がある。
 
 ### whole-archive 検証
 

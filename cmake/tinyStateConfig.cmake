@@ -26,38 +26,135 @@ set(TINYSTATE_TSCPP2 "${TINYSTATE_PREFIX}/bin/tscpp2"
     CACHE FILEPATH "tinyState code generator (tscpp2)")
 
 # --- imported library targets ----------------------------------------------
-# The framework is a *static* library, so the platform link deps (winsock on
-# Windows, pthread/rt/dl on Linux) are the consumer's responsibility and are
-# carried here as INTERFACE properties so applications inherit them for free.
-if(NOT TARGET tinyState::tinyState2)
-  add_library(tinyState::tinyState2 STATIC IMPORTED)
-  set_target_properties(tinyState::tinyState2 PROPERTIES
-    IMPORTED_LOCATION "${TINYSTATE_PREFIX}/lib/libtinyState2.a"
+# 静的 (.a) と共有 (.so/.dylib/.dll) のどちらが install されているかは、ビルド時の
+# TINYSTATE_BUILD_SHARED で決まる。このファイルは *実際に置かれているもの* を見て
+# ターゲット種別を決めるので、「静的だけ」「共有だけ」「両方」のいずれの install
+# でも find_package が成立する。決め打ちにすると、共有だけ install した prefix で
+# configure は通るのにリンク段階で「.a が無い」と落ちる (原因が分かりにくい)。
+#
+#   tinyState::tinyState2       静的があれば静的、無ければ共有 (従来の既定は静的)
+#   tinyState::tinyState2Shared 共有がある場合のみ定義。明示的に共有を選ぶ用
+#
+# 静的ライブラリはリンクを行わないので、プラットフォーム依存 (Windows の winsock、
+# Linux の pthread/rt/dl) は consumer の責任になる。ここで INTERFACE として持たせて
+# あるのでアプリは何も書かなくてよい。共有版は自身が依存を解決済みだが、同じものを
+# 載せておいても害はないので揃えている。
+
+# lib<base> の静的/共有/インポートライブラリのパスを引く
+macro(_tinystate_locate _base _out_static _out_shared _out_implib)
+  set(${_out_static} "")
+  set(${_out_shared} "")
+  set(${_out_implib} "")
+  if(EXISTS "${TINYSTATE_PREFIX}/lib/lib${_base}.a")
+    set(${_out_static} "${TINYSTATE_PREFIX}/lib/lib${_base}.a")
+  endif()
+  if(WIN32 OR CYGWIN)
+    # PE: 実体は bin/ の DLL、リンク先は lib/ のインポートライブラリ。
+    # MinGW は lib<base>.dll、Cygwin は cyg<base>.dll という名前になる。
+    if(EXISTS "${TINYSTATE_PREFIX}/bin/lib${_base}.dll")
+      set(${_out_shared} "${TINYSTATE_PREFIX}/bin/lib${_base}.dll")
+    elseif(EXISTS "${TINYSTATE_PREFIX}/bin/cyg${_base}.dll")
+      set(${_out_shared} "${TINYSTATE_PREFIX}/bin/cyg${_base}.dll")
+    endif()
+    if(NOT "${${_out_shared}}" STREQUAL ""
+        AND EXISTS "${TINYSTATE_PREFIX}/lib/lib${_base}.dll.a")
+      set(${_out_implib} "${TINYSTATE_PREFIX}/lib/lib${_base}.dll.a")
+    endif()
+  elseif(APPLE)
+    if(EXISTS "${TINYSTATE_PREFIX}/lib/lib${_base}.dylib")
+      set(${_out_shared} "${TINYSTATE_PREFIX}/lib/lib${_base}.dylib")
+    endif()
+  else()
+    if(EXISTS "${TINYSTATE_PREFIX}/lib/lib${_base}.so")
+      set(${_out_shared} "${TINYSTATE_PREFIX}/lib/lib${_base}.so")
+    endif()
+  endif()
+endmacro()
+
+# 共通の INTERFACE プロパティ。_shared が TRUE なら共有版として設定する。
+macro(_tinystate_set_common _tgt _shared)
+  set_target_properties(${_tgt} PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${TINYSTATE_PREFIX}/include;${TINYSTATE_PREFIX}/include/std2"
     INTERFACE_COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++2a>;$<$<COMPILE_LANGUAGE:CXX>:-frtti>;$<$<COMPILE_LANGUAGE:CXX>:-D__EXTENSIONS__>")
-
   if(WIN32)
     # MinGW native PE (MSYS2) or MinGW cross.  CYGWIN is *not* WIN32, so it
     # falls through to the POSIX branch below.
-    set_target_properties(tinyState::tinyState2 PROPERTIES
-      INTERFACE_LINK_LIBRARIES "ws2_32;mswsock;bcrypt"
-      INTERFACE_LINK_OPTIONS "-static;-static-libgcc;-static-libstdc++")
+    set_property(TARGET ${_tgt} PROPERTY
+      INTERFACE_LINK_LIBRARIES "ws2_32;mswsock;bcrypt")
+    if(NOT ${_shared})
+      # 静的版のみ: ランタイムを実行体へ静的に取り込む。DLL 版に付けると
+      # DLL 側が使うランタイムと二重になるので付けない。
+      set_property(TARGET ${_tgt} PROPERTY
+        INTERFACE_LINK_OPTIONS "-static;-static-libgcc;-static-libstdc++")
+    endif()
   else()
-    set_property(TARGET tinyState::tinyState2 PROPERTY
+    set_property(TARGET ${_tgt} PROPERTY
       INTERFACE_LINK_LIBRARIES Threads::Threads m)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-      set_property(TARGET tinyState::tinyState2 APPEND PROPERTY
+      set_property(TARGET ${_tgt} APPEND PROPERTY
         INTERFACE_LINK_LIBRARIES rt dl)
     endif()
+  endif()
+endmacro()
+
+_tinystate_locate(tinyState2     TS2_A   TS2_SO   TS2_IMP)
+_tinystate_locate(tinyState2Math TS2M_A  TS2M_SO  TS2M_IMP)
+
+if("${TS2_A}" STREQUAL "" AND "${TS2_SO}" STREQUAL "")
+  message(FATAL_ERROR
+    "tinyState: neither a static nor a shared libtinyState2 was found under "
+    "${TINYSTATE_PREFIX}/lib. The install appears to be incomplete.")
+endif()
+
+# 共有版ターゲット (共有が install されている場合のみ)
+if(NOT "${TS2_SO}" STREQUAL "" AND NOT TARGET tinyState::tinyState2Shared)
+  add_library(tinyState::tinyState2Shared SHARED IMPORTED)
+  set_target_properties(tinyState::tinyState2Shared PROPERTIES
+    IMPORTED_LOCATION "${TS2_SO}")
+  if(NOT "${TS2_IMP}" STREQUAL "")
+    set_target_properties(tinyState::tinyState2Shared PROPERTIES
+      IMPORTED_IMPLIB "${TS2_IMP}")
+  endif()
+  _tinystate_set_common(tinyState::tinyState2Shared TRUE)
+endif()
+if(NOT "${TS2M_SO}" STREQUAL "" AND NOT TARGET tinyState::tinyState2MathShared)
+  add_library(tinyState::tinyState2MathShared SHARED IMPORTED)
+  set_target_properties(tinyState::tinyState2MathShared PROPERTIES
+    IMPORTED_LOCATION "${TS2M_SO}"
+    INTERFACE_INCLUDE_DIRECTORIES "${TINYSTATE_PREFIX}/include;${TINYSTATE_PREFIX}/include/std2"
+    INTERFACE_LINK_LIBRARIES tinyState::tinyState2Shared)
+  if(NOT "${TS2M_IMP}" STREQUAL "")
+    set_target_properties(tinyState::tinyState2MathShared PROPERTIES
+      IMPORTED_IMPLIB "${TS2M_IMP}")
+  endif()
+endif()
+
+# 既定ターゲット。静的があれば静的 (従来どおり)、無ければ共有へ委譲する。
+if(NOT TARGET tinyState::tinyState2)
+  if(NOT "${TS2_A}" STREQUAL "")
+    add_library(tinyState::tinyState2 STATIC IMPORTED)
+    set_target_properties(tinyState::tinyState2 PROPERTIES
+      IMPORTED_LOCATION "${TS2_A}")
+    _tinystate_set_common(tinyState::tinyState2 FALSE)
+  else()
+    add_library(tinyState::tinyState2 INTERFACE IMPORTED)
+    set_target_properties(tinyState::tinyState2 PROPERTIES
+      INTERFACE_LINK_LIBRARIES tinyState::tinyState2Shared)
   endif()
 endif()
 
 if(NOT TARGET tinyState::tinyState2Math)
-  add_library(tinyState::tinyState2Math STATIC IMPORTED)
-  set_target_properties(tinyState::tinyState2Math PROPERTIES
-    IMPORTED_LOCATION "${TINYSTATE_PREFIX}/lib/libtinyState2Math.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${TINYSTATE_PREFIX}/include;${TINYSTATE_PREFIX}/include/std2"
-    INTERFACE_LINK_LIBRARIES tinyState::tinyState2)
+  if(NOT "${TS2M_A}" STREQUAL "")
+    add_library(tinyState::tinyState2Math STATIC IMPORTED)
+    set_target_properties(tinyState::tinyState2Math PROPERTIES
+      IMPORTED_LOCATION "${TS2M_A}"
+      INTERFACE_INCLUDE_DIRECTORIES "${TINYSTATE_PREFIX}/include;${TINYSTATE_PREFIX}/include/std2"
+      INTERFACE_LINK_LIBRARIES tinyState::tinyState2)
+  elseif(TARGET tinyState::tinyState2MathShared)
+    add_library(tinyState::tinyState2Math INTERFACE IMPORTED)
+    set_target_properties(tinyState::tinyState2Math PROPERTIES
+      INTERFACE_LINK_LIBRARIES tinyState::tinyState2MathShared)
+  endif()
 endif()
 
 # --- application/example build helper --------------------------------------
