@@ -76,7 +76,7 @@ TS_PRIVATE(sPtr<stdLimitSemaphore> sem;)
 			::printf("COUNTER %i\n",counter);
 			my_counter = counter++;
 			if ( counter < 10 )
-				thNEW(ts2Parallel,(me, 0));
+				me->spawn();		// 兄弟を生成 (type/body は root から継承)
 		PS_STATE(psDO)
 			sem->get();
 			::printf("  worker %d\n", my_counter);

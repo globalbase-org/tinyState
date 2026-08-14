@@ -57,6 +57,16 @@ TS_BEGIN_IMPLEMENT
  * me->spawn()             : spawn sibling, inherit type and body from root<br>
  * me->spawn(type)         : spawn sibling, override type<br>
  *
+ * <b>Use spawn(); do not construct a sibling directly with a worker as its
+ * parent</b> (thNEW(ts2Parallel,(me,...))).  That makes the spawning worker the
+ * new one's parent, so the parent chain becomes a string of siblings — and a
+ * tinyState releases its parent when it reaches ZOM, so the chain breaks at the
+ * first worker to finish.  Walking up from a later worker then stops at a
+ * finished sibling instead of reaching whoever started the group.  spawn()
+ * parents to the root, which outlives every sibling.<br>
+ * Constructing with the *creator* as parent is how a group is started, and is
+ * correct: thNEW(ts2Parallel,(ifThis, type, body)).
+ *
  * Cancellation:<br>
  * me->cancel()            : destroy all siblings and root; send TSE_RETURN to caller<br>
  *                           safe to call from any worker body; call only once per group<br>
@@ -112,6 +122,15 @@ TS_BEGIN_IMPLEMENT
  * 兄弟プロセスの生成:<br>
  * me->spawn()             : 兄弟を生成 (type・body を root から継承)<br>
  * me->spawn(type)         : type を指定して兄弟を生成<br>
+ *
+ * <b>兄弟の生成には spawn() を使うこと。worker を親にして直接構築してはいけない</b>
+ * (thNEW(ts2Parallel,(me,...)))。それをすると生成した worker が新しい worker の親に
+ * なり、親チェーンが兄弟の数珠つなぎになる。tinyState は ZOM に達すると parent を
+ * 手放すので、最初に終わった worker のところで鎖が切れる。後発の worker から親を
+ * 遡ると、グループを開始したオブジェクトではなく終了済みの兄弟で止まる。
+ * spawn() は root を親にするので、root は全兄弟より長生きすることが保証されている。<br>
+ * なお *生成主* を親にして構築するのはグループの開始方法であり、正しい:
+ * thNEW(ts2Parallel,(ifThis, type, body))。
  *
  * キャンセル:<br>
  * me->cancel()            : 全兄弟と root を destroy し、呼び出し元へ TSE_RETURN を返す<br>
@@ -225,7 +244,15 @@ ts2Parallel_::body(sPtr<stdEvent> ev)
 void
 ts2Parallel_::spawn(int type)
 {
-	thNEW(ts2Parallel,(ifThis, type));
+	/* 新しい兄弟の親は _root にする。ifThis (spawn を呼んだ worker) にすると
+	 * 親チェーンが 生成主 ← w1 ← w2 ← w3 … と兄弟の数珠になり、先に終わった
+	 * worker が ZOM で parent を手放した時点で鎖が切れる。後発の worker から
+	 * 親を遡って生成主を探す利用者は、そこで辿り着けなくなる。
+	 * _root なら鎖は worker → _root → 生成主 の 2 段で固定され、兄弟の終了に
+	 * 影響されない。_root は FIN_START で _next が空になるまで待つので、
+	 * どの worker が生きている間も必ず生存している。
+	 * root 自身が spawn した場合は _root == ifThis なので従来と同じ。 */
+	thNEW(ts2Parallel,(_root, type));
 }
 
 void
