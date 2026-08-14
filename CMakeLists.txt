@@ -212,6 +212,9 @@ add_subdirectory(math2)
 # whole-archive テスト (EXCLUDE_FROM_ALL: 明示的にビルド指定時だけ include)
 add_subdirectory(example/whole-archive-test EXCLUDE_FROM_ALL)
 
+# exe + 共有ライブラリで TLS が 1 実体かを見るテスト (同上)
+add_subdirectory(example/multi-image-test EXCLUDE_FROM_ALL)
+
 # MinGW: TRE オブジェクトを libtinyState2 に取り込む (consumer は追加リンク不要)。
 if(WIN32 AND NOT CYGWIN)
   target_sources(tinyState2 PRIVATE $<TARGET_OBJECTS:tre_mingw>)

@@ -5,11 +5,13 @@ CMakeFiles/
 cmake_install.cmake
 example/*/Makefile
 
-# build dirs (native + MinGW cross)
-build-mg*/
-build-mingw*/
+# build dirs — 任意サフィックスの build ディレクトリを全部除外する。
+# 以前は build-mg*/ build-mingw*/ しか書いておらず、build-wa/ build-clean/ 等が
+# 素通りして生成物が commit されたことがある。
+build/
+build-*/
 *.log
 
-# example build output (native + MinGW cross)
+# example build output
 example/*/build/
-example/*/build-mg/
+example/*/build-*/

@@ -166,6 +166,7 @@ cmake --build example/socktest/build
 | `nettest` | マシン間 TCP（`nettest server <port>` / `nettest client <host> <port>`） |
 | `srvtest` | サーバ階層（`srvtest tcp <port>` / `srvtest unix <path>`） |
 | `mmsgtest` | recvmmsg/sendmmsg スループット |
+| `riorace` | UDP ソケットの生成/受信/破棄チャーン（完了配送と teardown を競わせる） |
 | `systest` | ts2System 子プロセス生成 |
 
 各 example は `cmake -S example/<name> -B <build> -DCMAKE_PREFIX_PATH=<PREFIX>` で
@@ -244,6 +245,14 @@ target_link_libraries(myapp PRIVATE tinyState::tinyState2Shared)
 プロセス内で tinyState の実体と静的状態を確実に 1 組にしたい構成（複数の `.so` が
 それぞれ tinyState を内包すると実体が複数になる）では、共有版を選ぶ意味がある。
 
+> **Windows で複数イメージから使う場合の注意**: ヘッダにある inline なテンプレートの
+> `thread_local` は **exe と DLL でそれぞれ実体化される**。ELF は `STB_GNU_UNIQUE` で
+> 1 実体に統一するが、PE にその仕組みは無い。tinyState 自身の `sCallSection` について
+> はライブラリ内の 1 翻訳単位へ隔離済みなので、この版では起きない。
+> **同じ形を持つのは利用者側のコードも同じ**で、公開ヘッダから届くテンプレートに
+> 関数ローカルの `thread_local` があると、モジュール (実行時に読み込まれる別イメージ)
+> が実体化した時点で複製される。詳細は [GOTCHAS §13](GOTCHAS.md)。
+
 ### whole-archive 検証
 
 `.a` は参照を解決しないため、どの `.o` も引き込まれない限り未定義参照は表に
@@ -257,6 +266,18 @@ cmake --build build --target whole_archive_test_so
 
 ビルドが通ること自体が検証結果。tinyState 本体を丸ごと共有ライブラリへ
 取り込みたい利用者は、まずこれが通ることを確認するとよい。
+
+`example/multi-image-test` も同じ扱い (`--target multi_image_test`)。こちらは
+`TINYSTATE_BUILD_SHARED=ON` のときだけ定義され、exe と共有ライブラリが
+`sCallSection::key` の同じ実体を見ているかを確認する。
+
+> どちらも **本体のビルドツリーの中のターゲット**で、`example/<name>` を単独で
+> configure するものではない (in-tree のターゲットを参照するため)。
+>
+> `whole_archive_test_so` は `libtinyState2Math` 経由で **GMP/MPFR に実リンク**する
+> ので、それらの開発パッケージが無い環境ではリンクできない (`cannot find -lgmp`)。
+> MinGW **クロス**ビルド環境には通常入っていないので、この検証は MSYS2 ネイティブ
+> (`mingw-w64-x86_64-gmp` / `-mpfr` を導入済み) か Linux / macOS で行う。
 
 ---
 

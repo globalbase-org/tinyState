@@ -7,7 +7,6 @@ set(TS2_SOURCES
   classes/ts2/c++/ts2Parallel.cpp
   classes/ts2/c++/stdSemaphore.cpp
   classes/ts2/c++/stdString.cpp
-  classes/ts2/c++/tsFinishChecker.cpp
   classes/ts2/c++/stdBuffer.cpp
   classes/ts2/c++/tsThread.cpp
   classes/ts2/c++/stdLimitSemaphore.cpp

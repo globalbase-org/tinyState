@@ -113,10 +113,6 @@ public:
 		int max);
 #endif
 
-	int printf(sPtr<tinyState> ,const char * fmt,...);
-	int v_printf(sPtr<tinyState> ,const char * fmt,va_list arg);
-	int printf_err(sPtr<tinyState> ,const char * fmt,...);
-	int v_printf_err(sPtr<tinyState> ,const char * fmt,va_list arg);
 	virtual int announce() {
 		return realMaxfd;
 	}

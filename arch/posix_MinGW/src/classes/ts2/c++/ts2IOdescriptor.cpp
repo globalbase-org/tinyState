@@ -387,10 +387,15 @@ ts2IOdescriptor_::pump_io()
 			StartThreadpoolIo(tpio);
 			if ( io.is_notNull() ) io->addRefio(ifThis);		/* op posted → keep reactor alive until io_cb */
 		DWORD got = 0;
-			if ( ! ReadFile(fd,p,n,&got,&read_ov) && GetLastError() != ERROR_IO_PENDING ) {
+		DWORD e = 0;
+			if ( ! ReadFile(fd,p,n,&got,&read_ov) && (e = GetLastError()) != ERROR_IO_PENDING ) {
+				/* 失敗理由は ReadFile の直後に確保する。CancelThreadpoolIo も
+				   delRefio (mutex + キュー操作 + PostQueuedCompletionStatus) も
+				   last-error を書き換えるので、後から GetLastError() を呼ぶと
+				   別の値になる。0 を渡すと complete_fill が EOF と解釈する。 */
 				CancelThreadpoolIo(tpio);
 				if ( io.is_notNull() ) io->delRefio(ifThis);	/* no completion coming */
-				rbuf->complete_fill(0,(int)GetLastError());
+				rbuf->complete_fill(0,(int)e);
 			}
 		}
 		if ( wbuf && wbuf->reserve_drain(p,n) ) {			/* writes drain fully then stop (no perpetual op) */
@@ -398,10 +403,11 @@ ts2IOdescriptor_::pump_io()
 			StartThreadpoolIo(tpio);
 			if ( io.is_notNull() ) io->addRefio(ifThis);
 		DWORD got = 0;
-			if ( ! WriteFile(fd,p,n,&got,&write_ov) && GetLastError() != ERROR_IO_PENDING ) {
+		DWORD e = 0;
+			if ( ! WriteFile(fd,p,n,&got,&write_ov) && (e = GetLastError()) != ERROR_IO_PENDING ) {
 				CancelThreadpoolIo(tpio);
 				if ( io.is_notNull() ) io->delRefio(ifThis);
-				wbuf->complete_drain(0,(int)GetLastError());
+				wbuf->complete_drain(0,(int)e);
 			}
 		}
 	}
@@ -448,10 +454,11 @@ ts2IOdescriptor_::io_teardown_flush()
 		StartThreadpoolIo(tpio);
 		if ( io.is_notNull() ) io->addRefio(ifThis);		/* op posted (balanced by io_cb below) */
 	DWORD got = 0;
-		if ( ! WriteFile(fd,p,n,&got,&write_ov) && GetLastError() != ERROR_IO_PENDING ) {
+	DWORD e = 0;
+		if ( ! WriteFile(fd,p,n,&got,&write_ov) && (e = GetLastError()) != ERROR_IO_PENDING ) {
 			CancelThreadpoolIo(tpio);
 			if ( io.is_notNull() ) io->delRefio(ifThis);
-			wbuf->complete_drain(0,(int)GetLastError());
+			wbuf->complete_drain(0,(int)e);
 			break;
 		}
 		WaitForThreadpoolIoCallbacks(tpio,FALSE);	/* io_cb -> complete_drain + delRefio */

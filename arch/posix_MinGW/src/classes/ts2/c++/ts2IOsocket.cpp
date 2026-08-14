@@ -363,7 +363,6 @@ protected:
 					   ts2IOsockUDP sets 1 (RIO default); degraded to 0 at first I/O
 					   if RIO is unavailable (Win7 / wine / TS2_DISABLE_RIO). */
 	int		rio_ready;	/* CQ/RQ/buffers built + wait registered */
-	int		rio_armed;	/* 1 while a RIONotify is outstanding (avoid WSAEALREADY) */
 	int		rio_active;	/* 1 while we hold the single "active" keep-alive refio */
 	int		rio_idle_us;	/* idle keep-alive timeout (µs); see set_rio_idle_us */
 	int		rio_recv_depth;	/* concurrently-posted recv cap (0=n); measurement knob */
@@ -375,10 +374,12 @@ protected:
 	RIO_RQ		rio_rq;		/* this socket's request queue on rio_cq */
 	HANDLE		rio_event;	/* CQ notification event (auto-reset) */
 	PTP_WAIT	rio_tpwait;	/* CreateThreadpoolWait handle (modern pool) — the delivery bridge */
-	int		rio_closing;	/* teardown guard: stop the callback re-arming SetThreadpoolWait */
+	sThreadMutex	rio_wmtx;	/* pairs {test rio_closing + arm} against {set rio_closing + disarm} */
+	int		rio_closing;	/* teardown guard: no arming from here on — guarded by rio_wmtx */
 	int		ensure_rio();	/* build CQ/RQ/buffers + start delivery; 0 ok, 1 RIO-unavailable (degrade), -1 error */
 	int		rio_drain();	/* dequeue+process all ready completions into the rings; returns count */
 	void		rio_on_notify();	/* callback body: drain + re-arm RIONotify + wakeup */
+	void		rio_arm_wait();		/* arm the threadpool wait unless teardown began */
 	void		rio_touch();	/* a request arrived: (re)acquire the active refio + push deadline */
 	void		rio_idle_check();	/* release the active refio once idle past the timeout */
 	int		rio_pump();	/* keep every recv slot posted + drain the send ring */
@@ -413,7 +414,6 @@ TS_END_INTERFACE
     dsendring = 0; \
     enhanced = 0; \
     rio_ready = 0; \
-    rio_armed = 0; \
     rio_active = 0; \
     rio_idle_us = TS2IO_RIO_IDLE_US; \
     rio_recv_depth = 0; \
@@ -635,11 +635,14 @@ ts2IOsocket_::pump_io()
 				if ( io.is_notNull() ) io->addRefio(ifThis);		/* op posted → keep-alive until io_cb */
 			WSABUF wb; wb.buf = p; wb.len = c;
 			DWORD got = 0, fl = 0;
+			int e = 0;
+				/* 失敗理由は WSARecvFrom の直後に確保する (last-error は
+				   CancelThreadpoolIo / delRefio で壊れる)。 */
 				if ( WSARecvFrom((SOCKET)fd,&wb,1,&got,&fl,pa,pal,&drecv_ov,NULL) != 0
-						&& WSAGetLastError() != WSA_IO_PENDING ) {
+						&& (e = WSAGetLastError()) != WSA_IO_PENDING ) {
 					CancelThreadpoolIo(tpio);
 					if ( io.is_notNull() ) io->delRefio(ifThis);
-					drecvring->recv_complete(0,WSAGetLastError());
+					drecvring->recv_complete(0,e);
 				}
 			}
 		}
@@ -651,11 +654,12 @@ ts2IOsocket_::pump_io()
 				if ( io.is_notNull() ) io->addRefio(ifThis);
 			WSABUF wb; wb.buf = p; wb.len = len;
 			DWORD got = 0;
+			int e = 0;
 				if ( WSASendTo((SOCKET)fd,&wb,1,&got,0,pal?pa:NULL,pal,&dsend_ov,NULL) != 0
-						&& WSAGetLastError() != WSA_IO_PENDING ) {
+						&& (e = WSAGetLastError()) != WSA_IO_PENDING ) {
 					CancelThreadpoolIo(tpio);
 					if ( io.is_notNull() ) io->delRefio(ifThis);
-					dsendring->send_complete(0,WSAGetLastError());
+					dsendring->send_complete(0,e);
 				}
 			}
 		}
@@ -693,11 +697,12 @@ ts2IOsocket_::io_teardown_flush()
 		StartThreadpoolIo(tpio);
 		if ( io.is_notNull() ) io->addRefio(ifThis);		/* op posted (balanced by io_cb below) */
 	WSABUF wb; wb.buf = p; wb.len = len; DWORD got = 0;
+	int e = 0;
 		if ( WSASendTo((SOCKET)fd,&wb,1,&got,0,pal?pa:NULL,pal,&dsend_ov,NULL) != 0
-				&& WSAGetLastError() != WSA_IO_PENDING ) {
+				&& (e = WSAGetLastError()) != WSA_IO_PENDING ) {
 			CancelThreadpoolIo(tpio);
 			if ( io.is_notNull() ) io->delRefio(ifThis);
-			dsendring->send_complete(0,WSAGetLastError());
+			dsendring->send_complete(0,e);
 			break;
 		}
 		WaitForThreadpoolIoCallbacks(tpio,FALSE);
@@ -787,9 +792,8 @@ ts2IOsocket_::ensure_rio()
 	rio_ready = 1;
 	rio_tpwait = CreateThreadpoolWait(rio_tpwait_cb,this,NULL);
 	if ( ! rio_tpwait ) { err = (int)GetLastError(); state = TS2IO_ERROR; return -1; }
-	SetThreadpoolWait(rio_tpwait,rio_event,NULL);		/* arm for the first signal */
-	if ( rio_t->RIONotify(rio_cq) == 0 )			/* NO_ERROR: one notification armed */
-		rio_armed = 1;
+	rio_arm_wait();						/* arm for the first signal (under rio_wmtx) */
+	rio_t->RIONotify(rio_cq);				/* arm the CQ→event notification */
 	/* Phase B: the pump keeps every free recv slot posted (rio_pump), so a datagram is
 	   not dropped in the completion→re-post window.  These receives do NOT hold refio
 	   (that would pin an idle socket alive — RIO has no per-op cancel); the single
@@ -875,10 +879,21 @@ ts2IOsocket_::set_rio_ring_slots(int slots)
    dropped in the completion→re-post window), and drain the send ring.  The posted
    receives do NOT hold a keep-alive refio (that would pin an idle socket alive and
    block shutdown, since RIO has no per-op cancel); the single active refio +
-   rio_idle_check govern lifetime instead.  Completions arrive via rio_drain. */
+   rio_idle_check govern lifetime instead.  Completions arrive via rio_drain.
+
+   Why posting here (app thread) needs no lock against rio_drain (pool thread):
+   RIO leaves BOTH queues unsynchronized, but they are two separate queues — MSDN
+   RIODequeueCompletion, Remarks: "Different threads can access separate requests/completion
+   queues without locks.  The need for synchronization occurs only when multiple threads try
+   to access the same queue."  Here each queue has exactly one accessor: the RQ is touched
+   only by rio_pump (app-mtx serializes it, and one socket = one RQ, so the MSDN caveat about
+   several threads issuing sends/receives on one socket does not apply), and the CQ only by
+   the completion callback (one-shot wait = serialized with itself; the single RIONotify in
+   ensure_rio runs before any callback can be delivered). */
 int
 ts2IOsocket_::rio_pump()
 {
+int failed = 0;			/* a post failed synchronously: no completion will follow it */
 	if ( ! rio_ready )
 		return 0;
 	if ( drecvring ) {					/* keep every free recv slot posted */
@@ -887,6 +902,7 @@ ts2IOsocket_::rio_pump()
 			if ( ! rio_t->RIOReceiveEx(rio_rq,&db,1,NULL,&ab,NULL,NULL,0,
 					(PVOID)(INT_PTR)0 /* dir=recv */) ) {
 				drecvring->rio_recv_complete(0,WSAGetLastError());
+				failed = 1;
 				break;				/* stop posting on failure */
 			}
 		}
@@ -897,11 +913,22 @@ ts2IOsocket_::rio_pump()
 			if ( ! rio_t->RIOSendEx(rio_rq,&db,1,NULL,(hasaddr?&ab:NULL),NULL,NULL,0,
 					(PVOID)(INT_PTR)1 /* dir=send */) ) {
 				dsendring->rio_send_complete(0,WSAGetLastError());
+				failed = 1;
 				break;				/* stop posting on failure */
 			}
 		}
 	}
 	rio_idle_check();					/* release the active refio once idle */
+	/* A post that fails synchronously records the error in the ring — but pump_io has
+	   already woken the satisfied waiters BEFORE calling us, and no completion follows a
+	   failed post, so nothing would ever run this pump again.  A reader/writer parked at
+	   that moment would sleep for good, and a parked waiter keeps `busy` true in
+	   rio_idle_check, so the keep-alive refio would never be released either: the reactor
+	   then waits forever and the process cannot exit.  Kick ourselves so pump_io
+	   runs once more and hands the error out.  It cannot loop: with the ring's error flag
+	   set, reserve() yields nothing, so the next pass sets no failure. */
+	if ( failed )
+		wakeup();
 	return 0;
 }
 
@@ -946,35 +973,57 @@ ts2IOsocket_::rio_on_notify()
 {
 	if ( ! rio_t )
 		return;
-	rio_armed = 0;					/* the delivered notification is consumed */
 	rio_drain();
-	if ( rio_t->RIONotify(rio_cq) == 0 )		/* re-arm the CQ→event notification */
-		rio_armed = 1;
+	rio_t->RIONotify(rio_cq);			/* re-arm the CQ→event notification */
 	wakeup();
 }
 
+/* Arm the one-shot wait for the next CQ signal — unless teardown has begun.  The test of
+   rio_closing and the SetThreadpoolWait MUST be one atomic pair against rio_teardown's
+   {set rio_closing + disarm} pair, hence rio_wmtx: whichever pair runs first, the wait is
+   left disarmed for good — teardown's disarm cancels an arm made just before it, and an arm
+   attempted just after it sees rio_closing and does nothing.  Testing rio_closing outside
+   the lock is NOT enough: a callback preempted between the test and the
+   SetThreadpoolWait re-arms AFTER teardown disarmed and drained, and that late callback then
+   dequeues on a closed CQ / a freed object.  rio_wmtx is a leaf lock (only a Win32 call
+   inside), so it cannot participate in a cycle with the app-mtx or the ring mutex. */
+void
+ts2IOsocket_::rio_arm_wait()
+{
+sThreadMutexHandle __h(rio_wmtx);
+	if ( ! rio_closing && rio_tpwait )
+		SetThreadpoolWait(rio_tpwait,rio_event,NULL);
+}
+
 /* modern CreateThreadpoolWait callback (one-shot): drain, then re-arm the wait for the next
-   signal unless we are tearing down (rio_closing).  Same modern threadpool as the base
+   signal unless we are tearing down (rio_arm_wait).  Same modern threadpool as the base
    CreateThreadpoolIo path — the default RIO completion delivery. */
 VOID CALLBACK
 ts2IOsocket_::rio_tpwait_cb(PTP_CALLBACK_INSTANCE,PVOID ctx,PTP_WAIT,TP_WAIT_RESULT)
 {
 ts2IOsocket_ * self = (ts2IOsocket_*)ctx;
 	self->rio_on_notify();
-	if ( ! self->rio_closing )
-		SetThreadpoolWait(self->rio_tpwait,self->rio_event,NULL);	/* re-arm */
+	self->rio_arm_wait();				/* re-arm (no-op once rio_closing) */
 }
 
 /* RIO teardown (mtx外/TS_THREAD): drain the delivery so no completion can fire, then close
-   the CQ and deregister buffers before the base frees the rings / closes the socket.  Set
-   rio_closing (the callback stops re-arming), then WaitForThreadpoolWaitCallbacks(TRUE) waits
-   for a running callback + cancels a pending (possibly just-re-armed) wait.  Runs mtx-released
-   (TS_THREAD) so the wait can't deadlock the wakeup app-mtx.  COOKBOOK §6.7 drain table. */
+   the CQ and deregister buffers before the base frees the rings / closes the socket.  Under
+   rio_wmtx set rio_closing AND disarm the wait as one pair (see rio_arm_wait: this is what
+   makes "no callback can be armed after this point" true); then, with the lock
+   released, WaitForThreadpoolWaitCallbacks(TRUE) waits for a callback still running and
+   cancels one already queued.  Only after that is it safe to close the wait / the CQ / the
+   event.  Runs mtx-released (TS_THREAD) so the wait can't deadlock the wakeup app-mtx.
+   COOKBOOK §6.7 drain table. */
 void
 ts2IOsocket_::rio_teardown()
 {
+	rio_ready = 0;			/* first: a pump_io racing this teardown posts nothing more */
 	if ( rio_tpwait ) {
-		rio_closing = 1;				/* stop the callback re-arming */
+		{
+		sThreadMutexHandle __h(rio_wmtx);
+			rio_closing = 1;			/* no arming from here on */
+			SetThreadpoolWait(rio_tpwait,NULL,NULL);	/* disarm (cancels a just-made arm) */
+		}
 		WaitForThreadpoolWaitCallbacks(rio_tpwait,TRUE);	/* wait running + cancel pending */
 		CloseThreadpoolWait(rio_tpwait);
 		rio_tpwait = NULL;
@@ -986,17 +1035,23 @@ ts2IOsocket_::rio_teardown()
 		if ( io.is_notNull() ) io->delRefio(ifThis);
 		rio_active = 0;
 	}
-	if ( rio_t ) {
-		if ( drecvring ) drecvring->rio_deregister(rio_t);
-		if ( dsendring ) dsendring->rio_deregister(rio_t);
-		if ( rio_cq != RIO_INVALID_CQ ) {
-			rio_t->RIOCloseCompletionQueue(rio_cq);
-			rio_cq = RIO_INVALID_CQ;
+	/* Drop the table pointer BEFORE closing anything: the delivery is already drained, but
+	   if a callback ever did leak past the wait, rio_on_notify()'s `if (!rio_t) return;`
+	   now stops it instead of letting it dequeue on a closed CQ (belt and braces). */
+	{
+	RIO_EXTENSION_FUNCTION_TABLE * t = rio_t;
+		rio_t = NULL;
+		if ( t ) {
+			if ( drecvring ) drecvring->rio_deregister(t);
+			if ( dsendring ) dsendring->rio_deregister(t);
+			if ( rio_cq != RIO_INVALID_CQ ) {
+				t->RIOCloseCompletionQueue(rio_cq);
+				rio_cq = RIO_INVALID_CQ;
+			}
 		}
 	}
 	rio_rq = RIO_INVALID_RQ;					/* released with the socket */
 	if ( rio_event ) { CloseHandle(rio_event); rio_event = NULL; }
-	rio_ready = 0;
 }
 
 

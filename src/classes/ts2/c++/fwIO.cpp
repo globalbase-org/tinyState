@@ -59,42 +59,6 @@ fwIO::dump(const char * msg)
 }
 
 int
-fwIO::printf(sPtr<tinyState>  caller,const char * fmt,...)
-{
-	int 	ret;
-	va_list arg;
-	va_start(arg,fmt);
-	ret = v_printf(caller,fmt,arg);
-	va_end(arg);
-	return ret;
-}
-
-int
-fwIO::v_printf(sPtr<tinyState>  caller,const char * fmt,va_list arg)
-{
-	return v_printf(caller,fmt,arg);
-}
-
-
-int
-fwIO::printf_err(sPtr<tinyState>  caller,const char * fmt,...)
-{
-	int 	ret;
-	va_list arg;
-	va_start(arg,fmt);
-	ret = v_printf(caller,fmt,arg);
-	va_end(arg);
-	return ret;
-}
-
-int
-fwIO::v_printf_err(sPtr<tinyState>  caller,const char * fmt,va_list arg)
-{
-	return v_printf(caller,fmt,arg);
-}
-
-
-int
 fwIO::read(sPtr<tinyState>  THIS,int fd,int opt)
 {
 sPtr<fwIOdata>  dd;

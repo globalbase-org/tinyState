@@ -27,49 +27,6 @@ sPtr<stdFrameWork> fw;
 	return fw->detach(THIS);
 }
 
-int
-stdInterval::v_printf(sPtr<tinyState>  THIS,const char * fmt,va_list arg)
-{
-sPtr<stdFrameWork> fw;
-	fw = THIS->application->fw();
-	return fw->v_printf(THIS,fmt,arg);
-}
-
-int
-stdInterval::v_printf_err(sPtr<tinyState>  THIS,const char * fmt,va_list arg)
-{
-sPtr<stdFrameWork> fw;
-	fw = THIS->application->fw();
-	return fw->v_printf_err(THIS,fmt,arg);
-}
-
-int
-stdInterval::printf(sPtr<tinyState>  THIS,const char * fmt,...)
-{
-sPtr<stdFrameWork> fw;
-int 	ret;
-va_list arg;
-	fw = THIS->application->fw();
-	va_start(arg,fmt);
-	ret = fw->v_printf(THIS,fmt,arg);
-	va_end(arg);
-	return ret;
-}
-
-int
-stdInterval::printf_err(sPtr<tinyState>  THIS,const char * fmt,...)
-{
-sPtr<stdFrameWork> fw;
-int 	ret;
-va_list arg;
-	fw = THIS->application->fw();
-	va_start(arg,fmt);
-	ret = fw->v_printf(THIS,fmt,arg);
-	va_end(arg);
-	return ret;
-}
-
-
 
 
 INTEGER64

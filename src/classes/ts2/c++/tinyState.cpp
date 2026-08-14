@@ -2,7 +2,6 @@
 
 
 #include	"_ts2/c++/tinyState_.h"
-#include	"ts2/c++/tsFinishChecker.h"
 #include	"ts2/c++/sException.h"
 #include	"ts2/c++/sThreadMutexRecursive.h"
 #include	"ts2/c++/sThreadMutexHandleRelease.h"
@@ -14,6 +13,7 @@ CLASS_TINYSTATE(tinyState,)
 
 TS_BEGIN_IMPLEMENT
 
+#include	<atomic>
 #include	"ts2/c++/tsThread.h"
 #include	"ts2/c++/stdString.h"
 #include	"ts2/c++/sThreadMutexHandle.h"
@@ -169,7 +169,14 @@ private:
 	sThreadMutexRecursive			lm;
 		// lock for state, state_lock que thrInfo
 
-	TS_STATE_TYPE			_state;
+	/* reactor が fwIO::mu を保持したまま state() を呼ぶため、state() で lm を
+	 * 取ると mu -> lm の順序ができ、lm -> mu と AB-BA になる。atomic にして
+	 * state() からロックを外し、「fwIO::mu の内側で fwIO の外を呼ばない」を
+	 * 例外なしの規律にする。std::atomic<INTPTR> は lock-free で、素の INTPTR と
+	 * サイズもアラインも同じなのでオブジェクトの配置は変わらない。
+	 * 注意: C_TEST/C_NAME は引数を 2 回評価するので、必ずローカルへ
+	 * スナップショットしてから渡すこと (2 回目が別値だと (TS_TRANS*)0 になる)。 */
+	std::atomic<TS_STATE_TYPE>	_state;
 
 	static int			seqNo;
 
@@ -182,7 +189,6 @@ private:
 
 	unsigned			mtxLock_flag:1;
 	unsigned			thrQueueing_flag:1;
-  	unsigned			thrIns_flag:1;
 
 	INTEGER64			onlyOneEvent_mask;
 	INTEGER64			onlyOneEvent_occur;
@@ -219,7 +225,6 @@ protected:
 
  	unsigned			check_listener:1;
 	unsigned			destroy_stop:1;
-	unsigned			finish_checker:1;
 	unsigned			filter_lock:1;
 	int				realtime_pri;
 };
@@ -237,7 +242,6 @@ public:
 	}
 	static const char * trace_all;
 	static TS_REFER *referList;
-	static int	finish_checker;
 };
 TS_END_INTERFACE
 
@@ -253,8 +257,6 @@ const char *
 tinyState::trace_all;
 TS_REFER *
 tinyState::referList = 0;
-int
-tinyState::finish_checker = 0;
 
 tinyState::~tinyState()
 {
@@ -328,7 +330,7 @@ tinyState_::inherit(sPtr<tinyState>  parent)
 	{
 	sThreadMutexHandle __hdr(lm);
 
-		this->_state = INI_START;
+		this->_state.store(INI_START,std::memory_order_release);
 		this->state_lock = 0;
 		this->invoke_state_flag = 0;
 		this->objId = getSeq();
@@ -387,14 +389,17 @@ const char *
 tinyState_::getStateName()
 {
 sThreadMutexHandle __hdr(lm);
-	return C_NAME(this->_state);
+TS_STATE_TYPE st = this->_state;
+	return C_NAME(st);
 }
 
 TS_STATE_TYPE
 tinyState_::state()
 {
-sThreadMutexHandle __hdr(lm);
-	return _state;
+	/* ロックを取らない。単一ワードの読み出しで、呼び出し側は返った時点の値が
+	 * その後も有効だとは仮定できない (lm 版でもできなかった: 状態関数の実行中は
+	 * lm が解放されている)。lm を取ると mu -> lm の順序ができるので取らない。 */
+	return _state.load(std::memory_order_acquire);
 }
 
 
@@ -480,7 +485,8 @@ int
 tinyState_::is_destroyed()
 {
 sThreadMutexHandle __hdr(lm);
-	if ( C_TEST(_state,C_ZOM) )
+TS_STATE_TYPE st = _state;
+	if ( C_TEST(st,C_ZOM) )
 		return 1;
 	if ( destroy_flag )
 		return 1;
@@ -551,10 +557,11 @@ tinyState_::invoke_check(TS_STATE_TYPE state)
         	return;
 	if ( this->_state == state )
         	return;
-        if ( C_TEST(this->_state,C_ZOM) == 0 &&
+TS_STATE_TYPE st = this->_state;
+        if ( C_TEST(st,C_ZOM) == 0 &&
 			C_TEST (state,C_ZOM) )
                 this->enter_zom = 1;
-        this->_state = state;
+        this->_state.store(state,std::memory_order_release);
 	this->invoke_state_flag = 1;
 }
 void
@@ -563,11 +570,6 @@ tinyState_::invoke_state()
 	if ( this->invoke_state_flag == 0 )
 		return;
 	invoke_state_flag = 0;
-	if ( finish_checker && tinyState::finish_checker && C_TEST(_state,C_FIN) ) {
-		finish_checker = 0;
-		thNEW( tsFinishChecker,(ifThis,
-			tinyState::finish_checker));
-	}
 	this->invoke_listen([this](int*tp) {return tp ? *tp = TSE_STATE, thNULL : thNEW( stdEvent,(TSE_STATE,ifThis,_state));});
 	if ( this->enter_zom )
 {
@@ -651,11 +653,15 @@ sPtr<stdEvent>  ret;
 TS_STATE_FUNC func;
 TS_STATE_TYPE state;
 sCallSectionNode csn(ifThis);
+/* lm 内で他オブジェクトを呼ばないため、スレッドプールへの投入と起床は
+ * スコープ外へ回す。この呼び出しで実際にキューへ積んだときだけ真。 */
+int do_ins = 0;
 
 	{
 	sThreadMutexHandle __hdr(lm);
 
-		if ( C_TEST(this->_state,C_ZOM) )
+	TS_STATE_TYPE st0 = this->_state;
+		if ( C_TEST(st0,C_ZOM) )
 			return 0;
 		_insEvent(ev);
 		if ( this->state_lock )
@@ -693,10 +699,16 @@ sCallSectionNode csn(ifThis);
 								state = (*func)(this,ret);
 							}
 							else if ( thrInfo == thNULL ) {
+								/* ワーカ未割当。ここで getThread()->ins() を
+								 * 直接呼ぶと lm を保持したまま fwIO::addRefio()
+								 * → fwIO::mu を取りに行き、mu を保持して
+								 * state() (= lm) を待つ reactor と AB-BA になる。
+								 * 実際の投入は lm 解放後に行う。2025-01-04 に
+								 * wakeup() を同じ理由でスコープ外へ移したのと
+								 * 同じ扱い。 */
 								if ( thrQueueing_flag == 0 ) {
 									thrQueueing_flag = 1;
-									thrIns_flag = 1;
-									application->getThread()->ins(ifThis);
+									do_ins = 1;
 								}
 								state = 0;
 							}
@@ -735,7 +747,6 @@ sCallSectionNode csn(ifThis);
 				if ( state == ZOM )
 					break;
 			}
-			this->invoke_state();
 			if ( this->que == thNULL ||
 					this->que->count == 0 )
 				break;
@@ -750,9 +761,19 @@ sCallSectionNode csn(ifThis);
 			parent = thNULL;
 		}
 	}
-	if ( thrQueueing_flag && thrInfo == thNULL )
-//	if ( thrIns_flag && thrInfo == thNULL )
-		application->getThread()->wakeup();
+	/* ここから先は lm を解放済み。どれも他オブジェクトを呼ぶので lm 内では
+	 * 実行できない (invoke_state は listener へ、ins/wakeup は fwIO::mu へ届く)。
+	 *
+	 * 起床は ins() が行う。投入したときだけでよく、既にキュー済みの再入では
+	 * プール側の状態は何も変わっていないので起こす意味がない。旧コードは
+	 * thrQueueing_flag が立っている限り毎回起こしており、`&& thrInfo == thNULL`
+	 * でそれを「投入したときだけ」に絞ろうとしたように見えるが、thrInfo は直前に
+	 * 無条件で thNULL にされるため常に真で、条件として機能していなかった
+	 * (しかも lm 外の読み出しなので、別スレッドが thrInfo を書くと起床を
+	 * 取りこぼす側に倒れた)。 */
+	this->invoke_state();
+	if ( do_ins )
+		application->getThread()->ins(ifThis);	/* ins() がプールを起こす */
 
 	return 0;
 }
@@ -857,7 +878,8 @@ tinyState_::get_handle_list(int type)
 sPtr<stdQueueElement<stdEventHandle> > elp;
 sPtr<stdQueue<stdEventHandle> >  ret;
 sThreadMutexHandle __hdr(lm);
-	if ( C_TEST(_state,C_ZOM) || handle_list == thNULL )
+TS_STATE_TYPE st = _state;
+	if ( C_TEST(st,C_ZOM) || handle_list == thNULL )
 		return thNULL;
  	if ( type == 0 )
 	 	return thNEW( stdQueue<stdEventHandle>,(handle_list));

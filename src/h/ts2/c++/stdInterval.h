@@ -24,10 +24,6 @@ public:
 	/** @brief me に登録済みのタイマーを解除する。/ Cancel any timer registered for me. */
 	static int detach(sPtr<tinyState>  obj);
 	/** @brief stdFrameWork 経由でフォーマット出力する。/ Formatted output via stdFrameWork. */
-	static int printf(sPtr<tinyState> ,const char * fmt,...);
-	static int v_printf(sPtr<tinyState> ,const char * fmt,va_list arg);
-	static int printf_err(sPtr<tinyState> ,const char * fmt,...);
-	static int v_printf_err(sPtr<tinyState> ,const char * fmt,va_list arg);
 	/** @brief 現在時刻 (マイクロ秒、単調増加)。/ Current time in microseconds (monotonically increasing). */
 	static INTEGER64 now();
 

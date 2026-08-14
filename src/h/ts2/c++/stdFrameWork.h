@@ -19,10 +19,6 @@ public:
 	virtual int wait(sPtr<tinyState> ,INTEGER64,int) = 0;
 	virtual int loop(sPtr<tsApplication>) = 0;
 	virtual int detach(sPtr<tinyState> ,int flags=FWTR_ALL) = 0;
-	virtual int printf(sPtr<tinyState> ,const char * fmt,...) = 0;
-	virtual int v_printf(sPtr<tinyState> ,const char * fmt,va_list arg) = 0;
-	virtual int printf_err(sPtr<tinyState> ,const char * fmt,...) = 0;
-	virtual int v_printf_err(sPtr<tinyState> ,const char * fmt,va_list arg) = 0;
 	virtual void dump(const char *msg) = 0;
 	virtual void announce(int  msg) {}
 	virtual int announce() { return 0;}

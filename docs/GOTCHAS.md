@@ -523,3 +523,172 @@ tinyState v2.0.0-rc8 で、この検証を入れた結果 4 件が同時に見�
 ライブラリ未収録、`tinyState2Math` → `tinyState2` のリンク依存未宣言、
 in-tree ターゲットの winsock/pthread 未宣言。いずれも `.a` 利用者には
 無害だったため、長期間発覚していなかった。
+
+---
+
+## 13. Windows で共有ライブラリを複数イメージから使うと、TLS の実体が複製される
+
+### 症状
+
+Windows で、アプリを「exe + 複数の DLL」に分割し、そのうち複数のイメージから tinyState を
+使うと、状態機械の親が辿れず `application` が null になって SIGSEGV する。
+
+```
+#0  tinyState_::appMtxLock ... application->mtx.lock()   ← application が null
+#2  tinyState_::eventHandler
+#4  <アプリのクラス>::<コンストラクタ>          ← exe 側
+#6  <アプリのクラス>::start                     ← DLL 側
+```
+
+`sCallSection::key->caller()` が null を返しているのが起点になる。単一の exe に収めている
+間は起きず、DLL に割った瞬間に出る。
+
+### 原因
+
+`sThreadKey<__TYPE>::operator->()` は<b>ヘッダにある inline なテンプレート</b>で、その中に
+関数ローカルの `thread_local` 変数を持つ。この実体が<b>イメージごとに 1 つずつ作られる</b>。
+
+ELF ではこの手のシンボルが `STB_GNU_UNIQUE` になり、動的リンカがプロセス内で 1 実体に
+統一する:
+
+```
+$ nm -D libtinyState2.so | grep sThreadKey
+u _ZGVZNK10sThreadKeyI12sCallSectionEptEvE1h    ← u = unique global
+```
+
+<b>PE にはこれに相当する仕組みが無い</b>。exe と DLL がそれぞれ自分の TLS スロットを持つので、
+DLL 側で積んだ `sCallSection` を exe 側のコードが読むと空に見える。tinyState を共有ライブラリ
+(`tinyState::tinyState2Shared`) にしても、ヘッダの inline は各イメージで実体化されるので<b>解消
+しない</b>。
+
+Linux でこれが起きないのは上記のとおりで、移植の過程で「Linux では通るのに Windows だけ落ちる」
+という形で現れる。
+
+### 対処
+
+<b>ライブラリ側で、その `thread_local` を 1 つの翻訳単位に隔離する。</b>tinyState 本体では
+`sThreadKey<sCallSection>` を明示的特殊化し、定義を `sCallSection.cpp` へ移してある
+(宣言だけが `sThreadKey.h` に残る)。ヘッダに定義が無ければどのイメージも自前の実体を作れず、
+共有ライブラリから import するしかなくなるので、実行体をどう分割しても 1 実体になる。
+
+<b>利用側のパッケージングでは解決できない</b>点に注意。「テンプレートを実体化する層を 1 つの
+イメージへ寄せる」という対処は一見効きそうだが、モジュール機構 (実行時に読み込まれる
+プラグイン) を持つアプリでは<b>モジュールが定義上つねに別イメージ</b>なので、公開ヘッダから
+そのテンプレートに手が届く限り、サードパーティが 1 回実体化した時点で破綻する。
+
+単一の exe に全部静的リンクする構成なら、そもそもイメージが 1 つなので起きない。
+
+### 構成ごとの安全性
+
+| 構成 | ライブラリ本体 | ヘッダ内 static | |
+|---|---|---|---|
+| 単一 exe に全部静的 | 1 | 1 | 安全 |
+| exe + DLL 群、tinyState はどこか 1 つ | 1 | <b>複数</b> | 上記の対処が要る |
+| exe と DLL の両方に tinyState を静的 | 複数 | 複数 | 最悪。ただし下記 |
+
+3 番目を PE で試すと、リンカが弾く:
+
+```
+libtinyState2.a(stdObject.cpp.obj): multiple definition of `stdObject::addref()';
+    libyourapp.dll.a(...): first defined here
+```
+
+これは<b>PE が設計上の誤りを検出している</b>のであって、PE が不便なのではない。ELF は同じ構成を
+シンボル interposition で黙って通してしまう (exe 側の定義が勝ち、DLL 側が死にコードになって
+結果的に 1 つへ収束する)。§12 と同じく、<b>Linux で通ることは設計の正しさを保証しない</b>。
+
+### 実例
+
+Windows(MinGW) で「exe + ランタイム DLL + モジュール DLL 群」に分割した構成。モジュール DLL は
+ランタイム DLL から正しく import できていたが、exe とランタイム DLL の間だけ実体が 2 つに
+なっていた (`nm` で両方に同じシンボルが定義として現れる。正常なイメージでは 0 個)。
+
+---
+
+## 14. ロックは 3 つしかない — 役割と順序を跨ぐと止まる
+
+### 症状
+
+teardown が終わらない。reactor は `refio > 0` のまま無限待ちで、状態機械側は何も進まない。
+gdb で見ると、片方が `fwIO::mu` を保持して誰かの `lm` を待ち、もう片方が `lm` を保持して
+`fwIO::mu` を待っている。典型的な AB-BA デッドロック。
+
+Linux では滅多に出ず、Windows で頻発する。OS のスレッドプール(IOCP / RIO の完了通知)が
+**外部スレッドから `eventHandler` を駆動する**ので、状態機械とリアクタが同時に走る機会が
+桁違いに多いため。<b>Linux で出ないことは、順序が正しいことを意味しない。</b>
+
+### 3 つのロックと役割
+
+| ロック | 守るもの |
+|---|---|
+| `tinyState::lm` | その tinyState の内部変数(`_state` / `que` / `state_lock` / `event_listener` 等)。<b>オブジェクトごと</b> |
+| `tsApplication::mtx` (app-mtx) | 状態関数の実行の一意性。プロセスに 1 つ、再帰 |
+| `fwIO::mu` | fwIO 内のキュー(`read_objs` / `write_objs` / `interval_objs` / `refio`) |
+
+ローカルにしか使わない変数は対象外。`protected` に置いてあっても、その状態関数の中でしか
+読み書きしないフラグ等は守る必要がない。
+
+### 順序ポリシー
+
+```
+   app-mtx  ->  lm          許可      逆は不可
+   app-mtx  ->  fwIO::mu    許可      逆は不可
+   lm       <-> fwIO::mu    どちらの向きも作らない
+```
+
+守り方は 2 つの規律に落ちる。
+
+1. <b>`lm` を保持したまま他のオブジェクトを呼ばない。</b>他オブジェクトの `eventHandler` も、
+   スレッドプールへの投入も、fwIO の API も、`lm` の外で行う。
+2. <b>`fwIO::mu` を保持したまま fwIO の外を呼ばない。</b>
+
+### 落とし穴: 再帰ミューテックスの「1 段だけ解放」
+
+`lm` と app-mtx は再帰(`sThreadMutexRecursive`)で、`sThreadMutexHandle` /
+`sThreadMutexHandleRelease` は<b>1 段しか</b>取得/解放しない。したがって
+
+```cpp
+void A::f()            // 呼び出し元が既に lm を 1 段持っている
+{
+        { sThreadMutexHandle __h(lm); ... }   // ← ここを抜けても lm は解放されない
+        other->method();                       // ← lm 保持のまま外へ出ている
+}
+```
+
+は<b>意図した解放になっていない</b>。「内側で取って離すから安全」という書き方は、呼び出し元が
+既に保持していると成立しない。実際 `invoke_listen` がこの形で、リスナへの配送が `lm` 保持下で
+行われていた。
+
+### なぜ `tinyState::state()` はロックを取らないのか
+
+reactor は `fwIO::mu` を保持したまま登録キューを走査し、各オブジェクトの ZOM を判定する。
+ここで `state()` が `lm` を取ると `mu -> lm` ができ、上のポリシーに反する。
+
+そこで `_state` を `std::atomic` にして `state()` からロックを外してある。これは保証を弱めて
+いない — `state()` は値を返した瞬間に `lm` を手放すので、<b>返った値が使う時点でも有効だという
+保証は元々無かった</b>(状態関数の実行中は `lm` が解放されているので、実行中でも `state()` は
+成功する)。`lm` が実際に与えていた「引き裂けない読み」と「書き手の先行書き込みが見える」は、
+`memory_order_release` / `acquire` の対で保たれている。
+
+<b>`C_TEST` / `C_NAME` は引数を 2 回評価する。</b>atomic を直接渡すと 2 回ロードされ、
+2 回目が別値だとマクロが `(TS_TRANS*)0` を辿る。必ずローカルへスナップショットしてから渡すこと。
+
+```cpp
+TS_STATE_TYPE st = obj->state();
+if ( C_TEST(st,C_ZOM) ) ...
+```
+
+### 実例
+
+v2.0.0-rc11 で解消。Windows の RIO 経路で teardown 後にプロセスが終了しない事象(約 40%)が、
+`fwIO::loop` の ZOM スイープ(`mu` 保持 → `state()` → `lm`)と、TS_THREAD 状態をワーカ未割当で
+キューする枝(`lm` 保持 → `getThread()->ins()` → `setRefio()` → `fwIO::addRefio()` → `mu`)の
+AB-BA だった。両方の辺を切って 30 連続ノーハング。
+
+この枝は 2025-01 に一度触られており、そのとき `wakeup()` だけが `lm` の外へ移されて `ins()` が
+残っていた。<b>同じ枝の中で「外に出すもの」を一部だけ移すと、残りが後で牙を剥く。</b>
+
+観測についても記録しておく: この種のハングは<b>トレースを入れると消える</b>。ホットパスに出力を
+足すとタイミングが変わり、ハング率が別物になる(計測版では別経路が支配的になり、素のビルドとは
+分布が違った)。ホットパスは出力ゼロのカウンタにし、出力は無限待ちに入る瞬間の 1 行だけにする。
+A/B は必ず<b>同一ビルド構成で交互試行</b>する。

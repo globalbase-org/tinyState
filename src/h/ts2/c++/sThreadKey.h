@@ -45,4 +45,26 @@ public:
 	}
 };
 
+class sCallSection;
+
+/* sThreadKey<sCallSection> だけは、上の inline 定義を *使わない*。
+ *
+ * 関数ローカルの thread_local は、その関数を実体化したイメージごとに 1 つずつ
+ * できる。ELF ではこの手のシンボルが STB_GNU_UNIQUE になり、動的リンカが
+ * プロセス内で 1 実体へ統一するので問題にならない (nm -D で `u` と出る)。
+ * PE にはこれに相当する仕組みが無く、exe と DLL がそれぞれ自分のスロットを
+ * 持つ。sCallSection は「現在実行中の tinyState」を保持しているので、片方が
+ * 積んだものをもう片方が読むと空に見え、caller() が null → 親が辿れず
+ * application が null → appMtxLock で落ちる。
+ *
+ * 宣言だけをここに置き、定義は sCallSection.cpp (ライブラリ内の 1 つの TU) に
+ * 置く。こうするとどのイメージも自前の定義を作れず、共有ライブラリから import
+ * するしかなくなるので、実行体をどう分割しても 1 実体になる。
+ *
+ * これが効くのは tinyState を *共有ライブラリとして* 使う場合。静的ライブラリを
+ * 複数のイメージへリンクすれば当然それぞれが自分の複製を持つが、その構成は PE の
+ * リンカが multiple definition で弾く。docs/GOTCHAS.md §13。
+ */
+template<> sCallSection * sThreadKey<sCallSection>::operator -> () const;
+
 #endif

@@ -105,6 +105,17 @@ void ts2IOsockServer_::post_close()				{ }
 sPtr<ts2IO>
 ts2IOsockServer_::accept(int * errp,struct sockaddr * peer,sPtr<tinyState> caller)
 {
+	/* INI がまだ済んでいない (または失敗した) 状態で呼ばれた場合を弾く。
+	   sock と pAcceptEx は INI (TS_THREAD) で設定されるが、accept() は他オブジェクトの
+	   TS_STATE から直接呼ばれるので tinyState の状態直列化が効かない。呼ぶ側は
+	   TSE_WAKEUP を待って err を確認する規約 (example/srvtest 参照) だが、規約違反を
+	   NULL 関数ポインタ呼び出しで落とさずエラーとして返す。 */
+	if ( sock == INVALID_SOCKET
+			|| (sock_family() == AF_INET && pAcceptEx == NULL) ) {
+		if ( errp )
+			*errp = WSAENOTSOCK;
+		return thNULL;
+	}
 	/* AF_UNIX: a plain non-blocking accept polled via a 5ms timer — NOT AcceptEx.
 	   On Windows, AcceptEx on an AF_UNIX socket never delivers its IOCP completion
 	   (the op finishes but no packet fires) AND the socket it produces inherits
@@ -240,8 +251,17 @@ int alen = build_addr(&sa);
 			CreateIoCompletionPort((HANDLE)sock,(HANDLE)io->port(),(ULONG_PTR)fdid,0);
 	GUID g = WSAID_ACCEPTEX;
 	DWORD nb = 0;
-		WSAIoctl(sock,SIO_GET_EXTENSION_FUNCTION_POINTER,&g,sizeof(g),
-			&pAcceptEx,sizeof(pAcceptEx),&nb,NULL,NULL);
+		/* 戻り値を見ること。失敗すると pAcceptEx は NULL のまま残り、以後
+		   accept() が NULL 関数ポインタを呼ぶ。以前はここが未検査で、直後の
+		   errpos="OK" により成功として報告されていた。 */
+		if ( WSAIoctl(sock,SIO_GET_EXTENSION_FUNCTION_POINTER,&g,sizeof(g),
+				&pAcceptEx,sizeof(pAcceptEx),&nb,NULL,NULL) != 0
+				|| pAcceptEx == NULL ) {
+			errpos = "WSAIoctl(ACCEPTEX)";
+			err = WSAGetLastError();
+			pAcceptEx = NULL;
+			return rDO|FIN_ERROR;
+		}
 	}
 	else {
 		/* AF_UNIX: non-blocking listen socket, accept() is polled (no AcceptEx). */

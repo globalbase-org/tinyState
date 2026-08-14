@@ -353,7 +353,13 @@ tsThread_::ins(sPtr<tinyState> inp)
 		cond.signal();
 		setRefio();
 	}
-	//	wakeup();
+	/* 積んだことをプールの状態機械に知らせる。mtx の外で呼ぶこと (wakeup は
+	 * 自分の eventHandler に入る)。
+	 * 2025-01-04 に一度ここから呼び出し側へ移されたのは、ins() が tinyState の
+	 * lm を保持したまま呼ばれており、wakeup() が他オブジェクトへ届くと
+	 * lm -> fwIO::mu の順序を作ったため。ins() 自体を lm の外へ出したので、
+	 * その理由は無くなった。 */
+	wakeup();
 }
 
 void
