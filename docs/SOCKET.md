@@ -1,8 +1,8 @@
 # tinyState ソケット I/O バックエンド — OS 別実装マトリックス
 
 > v0 草案 (2026-07-21)
-> **コード由来の事実**（各 arch の実装・実測値）をまとめたもの。実測は共有 Windows 実機
-> NucBox7 (Windows 11) / simu01 (Linux) 由来。`要ひさ確認` の断りが無い箇所は実装/計測に基づく。
+> **コード由来の事実**（各 arch の実装・実測値）をまとめたもの。実測は Windows 11 実機 (x86_64) /
+> Linux 実機 (x86_64) 由来。`要ひさ確認` の断りが無い箇所は実装/計測に基づく。
 
 `ts2IO` 系（`ts2IOdescriptor` / `ts2IOsocket` / `ts2IOsockUDP` …）が、各 I/O API を OS ごとに
 **どのカーネル機構で実現しているか**の一覧と、その設計判断（特に Windows の RIO 既定化と自動
@@ -44,7 +44,7 @@
 ### 2.1 なぜ RIO 既定か
 
 RIO（Registered I/O, Windows 8+）は **登録バッファ＋ user-mapped の request/completion queue** で、
-per-op のバッファ probe/lock を省き、**keep-N-posted のパイプライン**を張れる。実測（NucBox7・
+per-op のバッファ probe/lock を省き、**keep-N-posted のパイプライン**を張れる。実測（Windows 11 実機・
 loopback・UDP・後述）で **連続ストリームは plain の約 5 倍**（plain は record-ring が単一 posted で
 直列化、RIO は N 個を同時 in-flight）。**1個ずつの request/response では RIO ≈ plain**（両方とも
 完了往復レイテンシ律速）。よって datagram は RIO を既定にした。
@@ -102,7 +102,7 @@ fwIO リアクタは datagram 完了経路に入らない。
 
 ---
 
-## 3. 実測サマリ（NucBox7 / Windows 11・loopback・UDP）
+## 3. 実測サマリ（Windows 11・x86_64・loopback・UDP）
 
 計測ハーネス `example/riobench`（srv/cli 別プロセス・mmsg blast＋END sentinel）。
 
