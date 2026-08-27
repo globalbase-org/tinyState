@@ -10,6 +10,12 @@ stdLimitSemaphore::stdLimitSemaphore(int lim)
 {
 	v_limit = lim;
 	this->wait = thNEW( stdQueue<tinyState>,());
+	/* 同じキーで ins したとき、既定 (insNeq=0) は「同キーの前」に入る = 後から来た待ち手が
+	 * 先に待っていた側を追い越す。enablePriority を立てると priority() の既定値 10000 が
+	 * 全員同じキーになるので、これを立てないと待ち行列が LIFO になり先着が飢える。
+	 * insNeq=1 なら「同キーの後ろ」に入るので、優先度が違えば優先度順・同じなら先着順。
+	 * enablePriority が偽のときは key=MAX_INTEGER64 の末尾追加経路に入るので参照されない。 */
+	this->wait->insNeq = 1;
 }
 
 
@@ -46,7 +52,9 @@ sThreadMutexHandle __hdr(me->application->mtx);
 				return 0;
 			return 1;
 		});
-	this->wait->ins(MAX_INTEGER64,me);
+	if ( enablePriority )
+		this->wait->ins(me->priority(thNULL),me);
+	else	this->wait->ins(MAX_INTEGER64,me);
 	throw sException([this](sPtr<tinyState> caller) {
 		if ( this->wait->check(caller,0).is_notNull() )
 			return 0;

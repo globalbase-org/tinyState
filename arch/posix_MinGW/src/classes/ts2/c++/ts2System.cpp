@@ -257,8 +257,14 @@ ts2System_::do_exec(
 HANDLE p_in=INVALID_HANDLE_VALUE,  c_in=INVALID_HANDLE_VALUE;
 HANDLE p_out=INVALID_HANDLE_VALUE, c_out=INVALID_HANDLE_VALUE;
 HANDLE p_err=INVALID_HANDLE_VALUE, c_err=INVALID_HANDLE_VALUE;
+	/** Direct-exec form only.  The POSIX side runs a non-'#' command through `sh -c`;
+	 *  Windows has no sh to assume, so rather than silently picking cmd.exe (different
+	 *  quoting, different exit semantics) the call fails and the caller keeps control.
+	 *  Portable code prefixes '#' everywhere: POSIX then execs directly too, which only
+	 *  drops shell expansion — behaviour is otherwise the same.
+	 *  @see ts2System.h の @ref ts2system_cmdline / the command-string contract in ts2System.h */
 	if ( command[0] != '#' )
-		return -6;	/* shell mode unsupported on MinGW (Windows-port design memo §E) */
+		return -6;
 
 	if ( dmode & DM_APPLY ) {
 		c_in = *fd_r; c_out = *fd_w; c_err = *fd_err;

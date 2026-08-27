@@ -603,6 +603,29 @@ Windows(MinGW) で「exe + ランタイム DLL + モジュール DLL 群」に�
 ランタイム DLL から正しく import できていたが、exe とランタイム DLL の間だけ実体が 2 つに
 なっていた (`nm` で両方に同じシンボルが定義として現れる。正常なイメージでは 0 個)。
 
+### RTTI (`typeid` / `dynamic_cast`) には当てはまらない
+
+「PE はイメージごとに複製する」という性質は RTTI にも及ぶが、<b>結末は違う</b>。イメージを
+またいで `dynamic_cast` するコードは、この節の対処を持ち込まなくても動く。
+
+実測 (別プロジェクトが exe + ライブラリ DLL + モジュール DLL の 3 イメージで確認):
+
+| | `&typeid(T)` | `dynamic_cast` |
+|---|---|---|
+| MinGW g++ 16.1 | 3 イメージとも別アドレス | <b>成功</b> |
+| Cygwin g++ 11.5 | 3 イメージとも別アドレス | <b>成功</b> |
+| Linux g++ | 完全に同一 | 成功 |
+
+typeinfo の実体も `name()` の文字列も別アドレスなのに `operator==` が真になるのは、
+libstdc++ が `__GXX_MERGED_TYPEINFO_NAMES == 0` の環境では<b>名前を文字列比較する経路に
+フォールバック</b>するため (mangled name の先頭が `*` でない = pointer 比較でないことで判別
+できる)。`__declspec(dllexport/dllimport)` の注釈が無く auto-export に任せた構成でも同じだった。
+
+<b>これを一般則と思わないこと</b>: Apple の libc++ は RTTI が一意である前提でアドレス比較する
+ので、macOS で `-fvisibility=hidden` を使うと typeinfo が 2 つになって `dynamic_cast` が
+null を返す。<b>複製されるか</b>と<b>複製が壊すか</b>は別問題で、TLS は壊れ、RTTI は
+libstdc++ 上では壊れない。
+
 ---
 
 ## 14. ロックは 3 つしかない — 役割と順序を跨ぐと止まる

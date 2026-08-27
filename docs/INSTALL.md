@@ -160,6 +160,9 @@ cmake --build example/socktest/build
 |---|---|
 | `hello-world` | 最小の状態機械 |
 | `parallel-demo` / `semaphore-demo` / `rwlock-demo` | tsThread / セマフォ / RW ロック |
+| `thread-limit-demo` | `tsThread::limitThreadsNumber()` による worker 数の上限設定（自己検証つき） |
+| `parallel-lifetime-test` | `ts2Parallel` の worker ラムダが遅れて生まれた兄弟にも届くかの回帰テスト（自己検証つき・失敗時 exit 1） |
+| `semaphore-priority-test` | `stdLimitSemaphore::enablePriority` の入場順（優先度順 + 同順位は先着順）の回帰テスト（自己検証つき・失敗時 exit 1） |
 | `interval-timer` | interval タイマ + 並行 π 計算（Ctrl+C で終了） |
 | `naming-conventions` | 命名接頭辞（ss/std/ts）のデモ |
 | `socktest` / `udptest` / `unixtest` | TCP / UDP / AF_UNIX ループバック |

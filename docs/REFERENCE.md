@@ -1,4 +1,4 @@
-# tinyState リファレンス — イベント型 / ユーティリティ / エラー / デバッグ
+# tinyState リファレンス — イベント型 / ユーティリティ / 自動起動 SM / エラー / デバッグ
 
 > v0 草案 (2026-07-14)
 > **コード由来の事実**（ヘッダの定義・実使用）をまとめたもの。`要ひさ確認` と付いた箇所は
@@ -125,9 +125,65 @@ sPtr<stdBuffer> head = buf->shift(&erp, &rest, &len);   // 先頭 len を切り�
 
 ---
 
-## 3. エラー処理：`sException` / `EX_*` / `ERR_` 状態
+## 3. フレームワークが自動起動する状態機械
 
-### 3.1 `sException`（コード由来）
+`tsApplication` は `INI_START` の中で、ユーザの初期ラムダを呼ぶ**前に**下記 3 つを
+`thNEW` する (`tsApplication.cpp` の `INI_START`)。
+
+```cpp
+	fwClass     = thNEW(fwIO,(ifThis));		// イベントループ / I/O リアクタ
+	gc          = thNEW(tsGC,(ifThis));		// GC・遅延 destroy
+	threadQueue = thNEW(tsThread,(ifThis));	// TS_THREAD の worker pool
+	initial_lambda(ifThis);			// ← ユーザのコードはこの後
+```
+
+したがって**アプリ側の最初の 1 行が走る時点で 3 つとも既に起動済み**であり、いつでも
+取得して使える。**ユーザがこれらを `thNEW` してはならない** (二重起動になる)。
+
+| クラス | 役割 | 取得方法 |
+|---|---|---|
+| `fwIO` | イベントループ / I/O リアクタ | `application->fw()` |
+| `tsGC` | GC・遅延 destroy | `application->gc` (public メンバ) |
+| `tsThread` | TS_THREAD を実行する worker pool | `application->getThread()` |
+
+### 3.1 `tsThread` — worker pool
+
+`TS_THREAD(...)` 状態は、この pool の worker スレッド上で実行される。pool は
+**自動スケール**する:
+
+| 契機 | 動作 | 定数 (`tsThread.cpp`) |
+|---|---|---|
+| 起動時 | 2 本で開始 | `THREAD_MAX_IDLE_THREADS` = 2 |
+| ready キュー先頭が 10ms 以上待たされている | 目標本数 +1 | `THREAD_UP_DULATION` = 10ms |
+| アイドル worker が 2 本を超えた状態が 120s 継続 | 目標本数 -1 | `THREAD_DOWN_DULATION` = 120s |
+
+増加側に**既定では上限がない** — 同時にブロックする TS_THREAD の数だけ pthread が作られる。
+
+公開 API:
+
+```cpp
+sPtr<tsThread> thr = application->getThread();
+
+thr->limitThreadsNumber(4);          // worker 数の上限を 4 に設定
+int n = thr->limitThreadsNumber();   // 現在の上限値を取得 (既定 MAX_INTEGER = 無制限)
+```
+
+| メソッド | 意味 |
+|---|---|
+| `int limitThreadsNumber()` | 現在の上限値。既定は `MAX_INTEGER` (実質無制限) |
+| `void limitThreadsNumber(int lim)` | 上限を設定。実行中いつでも変更可。`THREAD_MAX_IDLE_THREADS` (2) 未満は 2 にクランプ。現在の目標本数が新上限を超えていればその場で切り下がる |
+
+- 上限に達して増やせないときは**黙って何もしない**。ready のエントリは worker が空き次第サービスされるので、待ち時間が伸びるだけで取りこぼしは起きない。
+- 上限は**目標本数**に対するもの。既存 worker は現在の job を終えてから抜けるため、縮小直後は実スレッド数が一時的に上限を上回る (ハードキャップではない)。
+- ⚠ **上限を絞ると deadlock しうる。** 既定の無制限成長は安全弁でもある。詳細と `stdLimitSemaphore` との使い分けは [COOKBOOK §6.2](COOKBOOK.md) を参照。
+
+`ins()` / `ins_setup()` / `del_setup()` はフレームワーク内部からの投入 API で、アプリから呼ぶものではない。目標本数そのものを直接読み書きする `runThreads()` は非公開 (protected)。
+
+---
+
+## 4. エラー処理：`sException` / `EX_*` / `ERR_` 状態
+
+### 4.1 `sException`（コード由来）
 
 `src/h/ts2/c++/sException.h`。コードは 2 種類のみ:
 
@@ -141,12 +197,12 @@ sPtr<stdBuffer> head = buf->shift(&erp, &rest, &len);   // 先頭 len を切り�
 を分け、I/O は「1 状態 = 1 操作・ev 非依存」で書く**（[CLAUDE.md 鉄則 5](../CLAUDE.md) /
 [GOTCHAS §7,§9](GOTCHAS.md)）。この再走モデルこそ tinyState の I/O 待ちの核心。
 
-### 3.2 `ERR_` 状態カテゴリ
+### 4.2 `ERR_` 状態カテゴリ
 
 状態名の接頭辞 `ERR_` はカテゴリ `C_ERR`（`tinyState.h`、状態名先頭 3 文字がカテゴリ）に
 対応する。`C_TEST(x->state(), C_ERR)` でエラー状態か判定できる。
 
-### 3.3 個別クラスの `err` メンバ
+### 4.3 個別クラスの `err` メンバ
 
 ソケット系（`ts2IOsockServer` / `ts2IOsockUDP` 等）は、生成の成否を**イベントではなく
 `err` メンバ**（int）で持つ（例: `server->err`、`server->errpos` に失敗箇所）。
@@ -158,9 +214,9 @@ sPtr<stdBuffer> head = buf->shift(&erp, &rest, &len);   // 先頭 len を切り�
 
 ---
 
-## 4. デバッグ：状態遷移トレース
+## 5. デバッグ：状態遷移トレース
 
-### 4.1 `trace_all`（コード由来）
+### 5.1 `trace_all`（コード由来）
 
 状態遷移トレースの発火経路（`tinyState.cpp`）が読むのは **`tinyState::trace_all`**（静的
 `const char *`、既定 `0`）。**非 null をセットするとトレースが有効**になり、`trace_msg` を
@@ -184,7 +240,7 @@ FWTR_RWI : FWTR_READ|FWTR|WRITE|FWTR_INTERVAL
 FWTR_ALL : FWTR_READ|FWTR|WRITE|FWTR_INTERVAL|FWTR_ACTIVE
 
 
-### 4.2 その他の切り分け
+### 5.2 その他の切り分け
 
 - デッドロックっぽい → ロック順序（[CLAUDE.md 鉄則 3](../CLAUDE.md)）
 - refcount が変 → `sPtr` 以外の smart pointer 混入を疑う（[CLAUDE.md 禁止リスト](../CLAUDE.md)）

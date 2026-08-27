@@ -35,8 +35,92 @@ public:
 	sRptr<tsApplication,tinyState>		parent;
 
 	void ins(sPtr<tinyState> thr);
+	/** @brief Register a per-worker setup/cleanup hook. / worker ごとの setup/cleanup フックを登録する。
+	 * @details
+	 * Each worker thread calls @c setup() on every registered stdThread when it starts,
+	 * and @c cleanup() on every registered stdThread when it exits.  Use it for state
+	 * that has to exist once per worker thread.
+	 *
+	 * @warning <b>Both are called while the worker holds the pool's internal mutex</b>,
+	 * which is an sThreadMutex and therefore <b>not recursive</b>.  Anything reached from
+	 * a hook that takes that mutex again deadlocks the worker on itself — that includes
+	 * ins(), limitThreadsNumber() and the rest of this class.  Do not call back into
+	 * tsThread from a hook.
+	 *
+	 * @note Registration is not retroactive.  A worker runs the list as it stands when
+	 * that worker starts, so a stdThread registered after workers already exist gets
+	 * @c setup() only on workers created later, while @c cleanup() still runs on all of
+	 * them at exit.  Register before the pool has grown — at application start — if you
+	 * need the pairing to hold.
+	 *
+	 * ---
+	 *
+	 * 各 worker スレッドは、起動時に登録済み stdThread すべての @c setup() を、終了時に
+	 * すべての @c cleanup() を呼ぶ。worker スレッドごとに 1 つ必要な状態の用意に使う。
+	 *
+	 * @warning <b>どちらも worker が pool 内部の mutex を保持したまま呼ばれる。</b>
+	 * この mutex は sThreadMutex = <b>非再帰</b>なので、フックから同じ mutex を取る API を
+	 * 呼ぶと worker が自分自身を待って固まる。ins() や limitThreadsNumber() をはじめ、
+	 * 本クラスの API はフックの中から呼んではならない。
+	 *
+	 * @note 登録は遡及しない。worker は自分が起動した時点のリストを実行するので、worker が
+	 * 既に存在する状態で登録した stdThread は、以後に生成された worker でしか @c setup() が
+	 * 呼ばれない (@c cleanup() は終了時に全 worker で呼ばれる)。対で成立させたいなら、
+	 * pool が増える前 — アプリケーション起動時 — に登録すること。
+	 */
 	void ins_setup(sPtr<stdThread> thr);
+	/** @brief Unregister a hook registered with ins_setup(). / ins_setup() で登録したフックを外す。
+	 * @details Same locking contract as ins_setup() — see its @c warning.
+	 * / ロックの契約は ins_setup() と同じ。そちらの @c warning を参照。
+	 */
 	void del_setup(sPtr<stdThread> thr);
+	/** @brief Get the current worker thread upper limit. / worker スレッド数の上限値を取得する。
+	 * @return Current upper limit / 現在の上限値
+	 */
+	int limitThreadsNumber();
+	/** @brief Set the worker thread upper limit. / worker スレッド数の上限値を設定する。
+	 * @details
+	 * The pool grows automatically as TS_THREAD bodies block; by default it is
+	 * unbounded (@c MAX_INTEGER).  This caps that growth.
+	 * Values below @c THREAD_MAX_IDLE_THREADS (2) are clamped to 2.
+	 * Lowering the limit below the current target shrinks the target to @a lim.
+	 *
+	 * The cap applies to the @em target thread count, not to live threads: an
+	 * existing worker only exits after finishing its current job, so the live
+	 * count may briefly exceed @a lim after a shrink.
+	 *
+	 * @warning Capping the pool can deadlock.  If every worker blocks inside a
+	 * TS_THREAD body and releasing them requires another TS_THREAD to make
+	 * progress (blocking I/O, a semaphore wait under THR_CATCH, TS_THREADs
+	 * waiting on each other), the unbounded default is what saves you today.
+	 * Choosing a limit is the application's responsibility.
+	 * To merely bound concurrency, prefer stdLimitSemaphore acquired in a
+	 * TS_STATE before entering TS_THREAD -- that holds no worker, so the pool
+	 * does not grow in the first place.
+	 *
+	 * ---
+	 *
+	 * pool は TS_THREAD がブロックするたび自動的に増える。既定は無制限
+	 * (@c MAX_INTEGER)。本 API はその増加に上限を設ける。
+	 * @c THREAD_MAX_IDLE_THREADS (2) 未満の値は 2 にクランプされる。
+	 * 現在の目標値より小さい上限を設定した場合、目標値も @a lim まで切り下がる。
+	 *
+	 * 上限は<b>目標値</b>に対するものであり、live thread のハードキャップではない。
+	 * 既存 worker は現在の job を終えてから終了するため、縮小直後は一時的に
+	 * @a lim を上回ることがある。
+	 *
+	 * @warning 上限を絞ると deadlock しうる。全 worker が TS_THREAD 内でブロックし、
+	 * その解除に別の TS_THREAD の進行を要する構成 (ブロッキング I/O、THR_CATCH 内の
+	 * セマフォ待ち、TS_THREAD 同士の待ち合わせ) では、現状は既定の無制限成長が
+	 * これを回避している。上限設定はアプリケーション側の責任である。
+	 * 単に並列度を絞りたいだけなら、TS_STATE 内で stdLimitSemaphore を get() して
+	 * から TS_THREAD に入る方が適切 (worker を占有しないので pool が膨らまない)。
+	 *
+	 * @param[in] lim New upper limit / 新しい上限値
+	 * @see ins_setup() — must not be called from a per-worker hook (that runs under the
+	 *      pool mutex) / worker フックの中からは呼べない (pool の mutex 保持下で走るため)
+	 */
+	void limitThreadsNumber(int lim);
 
 private:
 protected:
@@ -50,6 +134,7 @@ protected:
 #endif
 	void runThreads(int num);
 	int runThreads();
+	void _runThreads_nolock(int num);
 	int readysAndRuns();
 	void _do_setup();
 	void _do_cleanup();
@@ -58,6 +143,7 @@ protected:
 	void resRefio();
 
 	int				targetRunThreads;
+	int				_limitThreadsNumber;
 	int				currentIdleThreads;
 	int				currentRunThreads;
 	sThreadMutex			mtx;
@@ -85,6 +171,12 @@ tsThread_::tsThread_(
         : tinyState_(_parent),
 	  parent(tinyState_::parent)
 {
+	/* 既定は無制限 = 現行動作 (TS_THREAD のブロックに応じて際限なく増える) の維持。
+	 * ★ sObject::operator new はインスタンスをゼロクリアする (sObject.cpp) ので、
+	 * ここで明示代入しないと 0 のまま _runThreads_nolock() のクランプが効き、
+	 * INI_START の runThreads(THREAD_MAX_IDLE_THREADS) が 0 に潰れて worker が
+	 * 1 本も生成されず、アプリ全体が停止する。 */
+	_limitThreadsNumber = MAX_INTEGER;
 }
 
 void
@@ -325,6 +417,9 @@ tsThread_::del_setup(sPtr<stdThread> thr)
 		setup_list->del(thr,0);
 }
 
+/* ★ _do_setup() / _do_cleanup() はどちらも __tsThread_body() が mtx を保持したまま
+ * 呼ぶ。mtx は非再帰なので、フックの中から mtx を取る API (ins() / limitThreadsNumber()
+ * 等) を呼ぶと worker が自分自身を待って固まる。ins_setup() の doxygen 参照。 */
 void
 tsThread_::_do_setup()
 {
@@ -379,16 +474,30 @@ int i;
 	currentRunThreads += num;
 }
 
+/* targetRunThreads への唯一の書き込み口。mtx 保持が前提。
+ * 上限クランプをここ 1 箇所に集約することで invariant
+ *	targetRunThreads <= _limitThreadsNumber
+ * が常に成立し、getter 側や呼び出し側でのクランプが一切不要になる。
+ * invariant が破れうるのは上限を下げた瞬間だけで、それは
+ * limitThreadsNumber(int) が現在値を再適用することで解消する。 */
 void
-tsThread_::runThreads(int num)
+tsThread_::_runThreads_nolock(int num)
 {
-sThreadMutexHandle __hdr(mtx);
-
+	if ( num > _limitThreadsNumber )
+		num = _limitThreadsNumber;
 	targetRunThreads = num;
 	if ( currentRunThreads < targetRunThreads )
 		create(targetRunThreads - currentRunThreads);
 	if ( currentRunThreads > targetRunThreads )
 		cond.broadcast();
+}
+
+void
+tsThread_::runThreads(int num)
+{
+sThreadMutexHandle __hdr(mtx);
+
+	_runThreads_nolock(num);
 }
 
 
@@ -397,6 +506,27 @@ tsThread_::runThreads()
 {
 sThreadMutexHandle __hdr(mtx);
 	return targetRunThreads;
+}
+
+
+int
+tsThread_::limitThreadsNumber()
+{
+sThreadMutexHandle __hdr(mtx);
+	return _limitThreadsNumber;
+}
+
+void
+tsThread_::limitThreadsNumber(int lim)
+{
+	if ( lim < THREAD_MAX_IDLE_THREADS )
+		lim = THREAD_MAX_IDLE_THREADS;
+	/* mtx は非再帰 (sThreadMutex) なので、握ったまま runThreads() を呼んではならない。
+	 * _runThreads_nolock() を直接呼ぶことで、上限の更新と目標値の切り下げも
+	 * アトミックになる。 */
+sThreadMutexHandle __hdr(mtx);
+	_limitThreadsNumber = lim;
+	_runThreads_nolock(targetRunThreads);	/* 再適用 → 上限超過分が切り下がる */
 }
 
 

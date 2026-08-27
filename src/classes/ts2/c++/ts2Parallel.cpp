@@ -315,6 +315,10 @@ sPtr<ts2Parallel> pr;
 		_root->_next = ifThis;
 	}
 	_fn = _root->org;
+	/* TS_ARGS が保存したコンストラクタ引数の複製。読むのは 3 行上の org = fn だけで、
+	 * 以後は誰も見ない。std::function はキャプチャをヒープに持つので、置いたままだと
+	 * root は同じキャプチャを fn / org / _fn の 3 重に抱えたまま生き続ける。 */
+	fn = nullptr;
 	if ( type < 0 )
 	  	type = _root->org_type;
 	if ( type == 0 )
@@ -335,9 +339,21 @@ TS_THREAD(ACT_START_THR)
 }
 TS_STATE(FIN_START)
 {
+	/* このワーカーの body はもう呼ばれない (状態が ACT_START* を離れている)。root が
+	 * _next 待ちでこの状態を再入しても、null 代入は冪等なので問題ない。 */
+	_fn = nullptr;
 	if ( _root == ifThis ) {
 		if ( _next != thNULL )
 			return 0;
+		/* ★ org を捨てるのは「兄弟が 1 つも居ない」ことを確認した後でなければならない。
+		 * org を読むのは body ではなく新しい兄弟の INI_START (_fn = _root->org) であり、
+		 * root は自分の body が終わった時点でこの状態に入って _next 待ちに座る。その待ちの
+		 * 間も生きている兄弟は spawn() できる (chain 方式の parallel-demo がそれ)。
+		 * この状態の冒頭で落とすと、以後に生まれた兄弟の _fn が空になり body() が
+		 * if ( _fn ) の偽側で return 1 する = クラッシュもエラーも無く、そのワーカーの
+		 * 仕事だけが静かに消える。上の early return を抜けた時点なら兄弟は居ないので、
+		 * 新たな spawn は起こり得ない。 */
+		org = nullptr;
 		parent->eventHandler(
 			thNEW(stdEvent,(TSE_RETURN,ifThis,(INTEGER64)0)));
 	}

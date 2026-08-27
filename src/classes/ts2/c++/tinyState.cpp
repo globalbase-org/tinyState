@@ -458,6 +458,18 @@ tinyState_::destroy(int delayFlag)
 	sThreadMutexHandle __hdr(lm);
 		if ( destroy_stop )
 			stdObject::panic("destroy STOP");
+		/* 既に ZOM = 破棄し終えた相手への destroy() は no-op にする。is_destroyed() は
+		 * C_ZOM も見る (下) のに、こちらは destroy_flag しか見ていなかったため、自然完了
+		 * したオブジェクトへの destroy() が destroy_flag の書き込み・TSE_INVOKE の投入・
+		 * THR_KILL(SIGPIPE) まで走っていた。いずれも eventHandler 側の C_ZOM ガードで
+		 * 吸収されるので観測可能な挙動は変わらないが、死んだ相手への destroy は本当に
+		 * 何もしないのが正しい。
+		 * destroy_stop の panic より後に置いてある。ZOM でも「destroy 禁止の相手を
+		 * destroy しようとした」呼び出し側のバグは捕まえたいため。
+		 * ref_destroy_flag は足さない。あれは「参照先が destroy 進行中」であって、
+		 * ここで早期 return すると本当に必要な destroy を握り潰す。 */
+		if ( C_TEST(this->_state,C_ZOM) )
+			return;
 		if ( this->destroy_flag )
 			return;
 		this->destroy_flag = 1;

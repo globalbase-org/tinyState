@@ -414,7 +414,14 @@ TS_STATE(ACT_WAIT_EXIT) {
 }
 ```
 
-> コマンド文字列の書式(先頭 `#` のシェル指定など)は `ts2System.h` / `systest` を参照。
+> **コマンド文字列の先頭文字が起動方式を選ぶ**。`#` 始まり(`#cmd arg1 arg2`)なら `sh` を挟まず
+> 直接起動で、`ret` が実プロセスの PID になる。`#` 無しなら `sh -c` 経由でシェル展開・パイプが
+> 使えるが、実プロセスは孫になる。詳細は `ts2System` の doxygen / `systest`。
+>
+> **Windows(MinGW) では `#` 始まりのみ**。`sh` が前提にできないので `#` 無しの文字列は起動せず
+> `-6` を返す。**移植を考えるなら常に `#` を付けておけばよい**(POSIX 側でも直接起動になるだけで、
+> シェル機能を使っていない限り挙動は変わらない)。上の例が `"#cmd /c echo hello"` なのはこのため。
+>
 > 終了時の `rfd` / `sys` の解放順序に注意 — Windows では descriptor teardown を fwIO
 > 生存中に走らせる必要がある(`systest` の `SYSTEST_LINGER` 節のコメント参照)。
 
@@ -548,6 +555,61 @@ TS_THREAD 内で外部ロックを持ったまま `other->eventHandler` を呼�
 
 ---
 
+## 6.2. worker スレッド数に上限を設ける (tsThread::limitThreadsNumber)
+
+`tsThread` は **`tsApplication` の起動時に自動的に立ち上がっている** (`INI_START` が `fwIO` / `tsGC` に続けて `thNEW` し、その後でユーザの初期ラムダを呼ぶ)。したがってアプリの最初の 1 行から `application->getThread()` で取得できる。**自分で `thNEW` してはならない** (→ [REFERENCE §3](REFERENCE.md))。
+
+TS_THREAD を実行する worker pool (`tsThread`) は**自動スケール**する。ready キューの先頭が 10ms 以上待たされていると 1 本ずつ増え、余った worker は 120s アイドルで 1 本ずつ減る。**既定は上限なし** (`MAX_INTEGER`) — 同時にブロックする TS_THREAD の数だけ pthread が作られる。
+
+組込み等でスレッド数を抑えたい場合は `limitThreadsNumber()` で上限を設定する。
+
+```cpp
+sPtr<tsThread> thr = application->getThread();
+
+thr->limitThreadsNumber(4);          // worker は 4 本まで
+int n = thr->limitThreadsNumber();   // 現在の上限値を取得
+```
+
+- 実行中いつでも変更できる。**縮小**した場合は目標本数もその場で切り下がる。
+- `THREAD_MAX_IDLE_THREADS` (2) 未満は 2 にクランプされる。
+- 上限に達して増やせないときは**黙って何もしない**。ready のエントリは worker が空き次第サービスされるので、待ち時間が伸びるだけで取りこぼしは起きない。
+
+### 上限は「目標値」であってハードキャップではない
+
+上限を下げても、既存 worker は**現在の job を終えてから**終了する。したがって縮小直後は実スレッド数が一時的に上限を上回る。「絶対に N 本を超えない」保証が要る用途には使えない。
+
+### ⚠ 上限を絞ると deadlock しうる
+
+全 worker が TS_THREAD 内でブロックし、その解除に**別の TS_THREAD の進行が必要**な構成では、pool を絞ると誰も進めなくなる。該当するのは例えば:
+
+- TS_THREAD 内のブロッキング I/O が、別の TS_THREAD の書き込みで初めて完了する
+- `THR_CATCH` 内のセマフォ待ちを、別の TS_THREAD が `release()` して解く
+- TS_THREAD 同士が互いの完了を待ち合わせる
+
+**既定の無制限成長は、これを暗黙に回避している安全弁でもある。** 上限値の妥当性はアプリケーション側の責任になる。
+
+### 並列度を絞りたいだけなら stdLimitSemaphore を使う
+
+「同時に走る処理を N 個までにしたい」が目的なら、pool に上限を掛けるのは筋が悪い。**TS_STATE 内で `stdLimitSemaphore::get()` してから TS_THREAD に入る**方が適切:
+
+```cpp
+TS_STATE(ACT_ACQUIRE) {
+    sem->get();                 // 取れなければ yield — worker を占有しない
+    return rDO | ACT_WORK;
+}
+TS_THREAD(ACT_WORK) {           // ここに来る SM は常に N 個以下
+    /* 重い処理 */
+}
+TS_STATE(ACT_RELEASE) {
+    sem->release();
+    return rDO | ACT_NEXT;
+}
+```
+
+TS_THREAD の**中**で `get()` すると、待っている間ずっと worker を掴んだままになる。すると ready が滞留して tsThread は「worker が足りない」と判断し、むしろ pool を増やしにいく (絞りたい目的と逆になる)。`limitThreadsNumber()` はこの代替ではなく、pool そのものの資源上限を切るための API。
+
+---
+
 ## 6.5. セマフォで SM 間の同時実行数を制御する
 
 `stdSemaphore` / `stdLimitSemaphore` — 同時実行数の制限と待ち行列
@@ -589,7 +651,34 @@ release() による正常起床か SIGPIPE 等によるスプリアス起床か�
 |---|---|---|
 | 初期カウント | コンストラクタで指定 | — |
 | 上限 | 固定 (初期値が上限) | `limit(n)` で動的変更可 |
-| 優先度付き待ち | `enablePriority` フラグあり | なし |
+| 優先度付き待ち | `enablePriority` フラグあり | `enablePriority` フラグあり |
+
+どちらも `enablePriority` を立てると、待ちキューを到着順ではなく `tinyState::priority()` 順にする。**値が小さいほど先に入場する** (キューは昇順に並べて先頭から取り出すため)。既定の `priority()` は `TS_DEFAULT_PRIORITY` (10000) なので、追い越したいなら小さい値を返すよう override する。
+
+> `stdLimitSemaphore` は同じ優先度の待ち手どうしの到着順を保つので、`priority()` をどこも override せずにフラグだけ立てても挙動は既定と変わらない。`stdSemaphore` の方は同優先度で順序が逆転する (`insNeq` を立てていないため) 点が異なる。
+
+> ⚠ **`priority()` の override は `.cpp` の実装ブロックの `public:` に置くこと。`protected:` だと効かない。**
+>
+> ```cpp
+> TS_BEGIN_IMPLEMENT
+> class TS_THISCLASS : public TS_BASECLASS {
+> public:
+>     hwWorker_(sPtr<tinyState> parent, ...);
+>     virtual int priority(sPtr<tinyState> caller=thNULL);   // ← public: に置く
+> protected:
+>     TS_DEFARGS
+> };
+> TS_END_IMPLEMENT
+> ```
+>
+> tscpp2 が `public:` のメンバだけを interface 側 (`_pb.h`) にも載せ、glue を生成する。`protected:` に置くと実装側 (`_.h`) にしか出ず、`tinyState::priority()` の glue が `impl->tinyState_::priority()` を**修飾付き (= 非仮想) で**呼ぶため、override が素通りされる。
+>
+> | 実装ブロックでの置き場所 | tscpp2 の出力 |
+> |---|---|
+> | `public:` | `_.h` (実装) **と** `_pb.h` (interface) + glue |
+> | `protected:` / `private:` | `_.h` のみ |
+>
+> 実例は `example/semaphore-priority-test`。
 
 ---
 

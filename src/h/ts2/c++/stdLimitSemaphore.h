@@ -26,6 +26,31 @@ public:
 	 */
 	int	count;
 	/**
+	 * @brief Order the wait queue by priority() instead of arrival — 待ちキューを到着順ではなく priority() 順にする
+	 * @details
+	 * Off by default: waiters are served strictly in arrival order.
+	 * Set it to 1 and get() files each waiter under tinyState::priority() instead.
+	 *
+	 * <b>A smaller value is served earlier</b> — the queue is sorted ascending and
+	 * dequeued from the head.  The default tinyState::priority() is
+	 * TS_DEFAULT_PRIORITY (10000), so override it to return less than that to jump
+	 * ahead, more to fall behind.
+	 *
+	 * Waiters of equal priority keep arrival order, so turning this on without
+	 * overriding priority() anywhere behaves exactly as it does off.
+	 *
+	 * 既定は 0 = 到着順 (先着順)。1 にすると get() が tinyState::priority() を
+	 * キーにして待ちキューへ入れる。
+	 *
+	 * <b>値が小さいほど先に入場する</b> — キューは昇順に並べて先頭から取り出すため。
+	 * tinyState::priority() の既定は TS_DEFAULT_PRIORITY (10000) なので、追い越したい
+	 * なら 10000 より小さい値を、後回しでよいなら大きい値を返すように override する。
+	 *
+	 * 同じ優先度の待ち手どうしは到着順を保つので、priority() をどこも override せずに
+	 * このフラグだけ立てても挙動は既定と同じになる。
+	 */
+	unsigned	enablePriority:1;
+	/**
 	 * @brief Constructor — コンストラクタ
 	 * @param[in] lim Maximum number of concurrent holders / 取得可能最大数
 	 */
