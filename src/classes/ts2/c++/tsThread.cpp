@@ -121,6 +121,16 @@ public:
 	 *      pool mutex) / worker フックの中からは呼べない (pool の mutex 保持下で走るため)
 	 */
 	void limitThreadsNumber(int lim);
+	/** @brief Teardown gate: are we done? — teardown ゲート: 畳み終わったか
+	 * @details Called by tsApplication's shutdown loop, under the application mutex.
+	 * Returns 1 once this pool has nothing left to do, latching that answer so later
+	 * calls keep returning 1.  Returns 0 while the caller should keep yielding.
+	 * Not for application use.
+	 *
+	 * tsApplication の shutdown ループが app-mutex 保持下で呼ぶ。畳み終わっていれば 1 を
+	 * 返し、その答えをラッチするので以後も 1 を返し続ける。0 の間は呼び手が譲る。
+	 * アプリケーションから呼ぶものではない。 */
+	int finish();
 
 private:
 protected:
@@ -153,6 +163,7 @@ protected:
 	sPtr<stdQueue<stdThread> >  		setup_list;
 
 	int8_t				thread_stop;
+	unsigned			finish_flag:1;
 
 	sTimer				timer;
 
@@ -509,6 +520,36 @@ sThreadMutexHandle __hdr(mtx);
 }
 
 
+/* teardown ゲートの本体。待っているのは
+ *
+ *	ready->count == 0  &&  run->count == 0  &&  is_stable()
+ *
+ * の 3 つが *同時に* 成立することで、3 つはそれぞれ「投入者がどこに居るか」を 1 つずつ
+ * 受け持っている: worker 上の連鎖 = run->count / main 上 = この関数と同一スレッドなので
+ * 直列 / gc 上 = is_stable。投入者は必ず tinyState という前提なので、匿名スレッドからの
+ * 飛び込みは無い。
+ *
+ * 呼び手 (tsApplication) は is_stable の待ちを stdObject::wait_stable() で mtx の外に
+ * 出して済ませてから、ここで 3 条件の同時性を確かめる。成立したらラッチして wakeup し、
+ * FIN_STABLE_WAIT を起こす。ラッチするのは、以後 is_stable が再び false に振れても
+ * 判定を蒸し返さないため。 */
+int
+tsThread_::finish()
+{
+	if ( C_TEST(state(),C_ZOM) )
+		return 1;
+	if ( !C_TEST(state(),C_FIN) )
+		return 0;		/* まだ FIN に入っていない */
+	if ( finish_flag )
+		return 1;		/* ラッチ済み */
+	if ( ready->count == 0 && run->count == 0 && stdObject::is_stable() ) {
+		finish_flag = 1;
+		wakeup();
+		return 1;
+	}
+	return 0;
+}
+
 int
 tsThread_::limitThreadsNumber()
 {
@@ -798,23 +839,30 @@ INTEGER64 age;
 /* Teardown must not free the worker pool while a refEvent (auto-teardown) can still
    fire and re-schedule a C_THR state onto it (that ins()es into `ready` and would
    NULL-deref once we drop it).  So first drain to a point where the pool is empty
-   AND the GC is stable (no pending delete / refEvent), polling every 1ms since
-   is_stable() offers no callback; only then spin the workers down and free.
-   A refEvent arriving mid-drain simply re-fills ready/run or unsettles the GC, so
-   the condition fails and we keep waiting until it truly converges. */
+   AND the GC is stable (no pending delete / refEvent); only then spin the workers
+   down and free.  A refEvent arriving mid-drain simply re-fills ready/run or
+   unsettles the GC, so the condition fails and we keep waiting until it converges.
+
+   The three conditions are checked together by finish(), which tsApplication calls;
+   the waiting for the is_stable() half happens outside the pool mutex, asleep in
+   stdObject::wait_stable().  This state machine only waits for that latch.  It used
+   to poll is_stable() on a 1ms timer, which was its own worst enemy: the timer's
+   deliveries kept unsettling the very condition being polled. */
 TS_STATE(FIN_START)
 {
-	timer.start(ifThis,1000);		/* 1ms poll */
 	return rDO|FIN_STABLE_WAIT;
 }
+/* 判定は自分ではせず、tsApplication 側の finish() がラッチするのを待つだけ。
+ *
+ * ここで is_stable() を 1ms タイマでポーリングしていた頃は、そのタイマ配送が生む
+ * 配送オブジェクトの解放が is_stable() を false に戻す自己競合になっていて、
+ * teardown が数百 ms〜秒単位で座り込んだ (30 回中 5 回が >300ms・最大 2.6 秒)。
+ * 間隔を伸ばすと悪化する (10ms で中央 15.9 秒) のがその証拠で、待つ機構そのものが
+ * 待ち条件を壊していた。今は待ちを stdObject::wait_stable() の眠りに寄せてある。 */
 TS_STATE(FIN_STABLE_WAIT)
 {
-	if ( ready->count == 0 && run->count == 0 && stdObject::is_stable() ) {
-		timer.stop(ifThis);
+	if ( finish_flag )
 		return rDO|FIN_DRAINED;
-	}
-	if ( timer.is_expire(ifThis) )
-		timer.start(ifThis,1000);
 	return 0;
 }
 TS_STATE(FIN_DRAINED)

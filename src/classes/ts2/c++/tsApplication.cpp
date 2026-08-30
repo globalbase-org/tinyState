@@ -271,8 +271,21 @@ TS_STATE(FIN_THREAD_ROOT_LOOP)
 			return rDO;
 	}
 	if ( !C_TEST(threadQueue->state(),C_ZOM) ) {
-	sThreadMutexHandleRelease __hdr(mtx);
-		usleep(10);
+		/* threadQueue が畳み終わるのを待つ。待っている実体は tsThread::finish() の
+		 * 3 条件 (ready 空・run 空・is_stable) の *同時* 成立で、そのうち is_stable の
+		 * 待ちだけをここで mtx の外へ出している。理由は stdObject::wait_stable() の
+		 * コメント参照。ここを脱した時点で is_stable は一度成立しており、3 条件の
+		 * 同時性は finish() が mtx の下で確かめる。 */
+		{
+		sThreadMutexHandleRelease __hdr(mtx);
+			stdObject::wait_stable();
+		}
+		if ( threadQueue->finish() == 0 ) {
+		/* まだ FIN に入っていない、あるいは ready/run が空でない。従来どおり 10µs 譲る
+		 * (ラッチが立った後は譲らない。そのときは実質動いている worker は居ない)。 */
+		sThreadMutexHandleRelease __hdr(mtx);
+			usleep(10);
+		}
 		return rDO;
 	}
 	/* ★ threadQueue コルーチンが zombie でも、最後の worker pthread は __tsThread_body の tail

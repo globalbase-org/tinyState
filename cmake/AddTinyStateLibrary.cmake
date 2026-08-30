@@ -34,8 +34,14 @@ function(add_tinystate_library)
   set(STAMPS)
 
   foreach(src ${TS_SOURCES} ${TS_ARCH_SOURCES})
-  	      # src のパスを .t 相当の stamp に変換
-    	string(REPLACE "/" "_" stamp ${src})
+  	      # src のパスを .t 相当の stamp に変換。
+	      # ':' も潰すこと。Windows では絶対パスが C:/... なのでコロンが残り、
+	      # NTFS では "名前:ストリーム" が代替データストリーム (ADS) の構文なので
+	      # stamps/C:_Users_….t は "C" というファイルの ADS になってしまう。
+	      # stamps/ の中身が 1 つ ("C") だけになり、ninja/make が stamp を stat
+	      # できず毎回 codegen 全件が再実行される (MinGW での full rebuild の主因)。
+	      # Cygwin は /cygdrive/c/... でコロンを含まないため無傷だった。
+    	string(REGEX REPLACE "[/:]" "_" stamp ${src})
 	set(stamp_file ${STAMP_DIR}/${stamp}.t)
 
 	# tscpp2 emits ${CMAKE_BINARY_DIR}/_ts2/c++/<basename>_.h and _pb.h for each
@@ -52,8 +58,19 @@ function(add_tinystate_library)
 	set(gen_priv ${CMAKE_BINARY_DIR}/_ts2/c++/${gen_base}_.h)
 	set(gen_pub  ${CMAKE_BINARY_DIR}/_ts2/c++/${gen_base}_pb.h)
 
+	# ただし tscpp2 がそれらを出すのは CLASS_TINYSTATE のクラスだけ。plain な
+	# stdObject 派生 (fwIO / sArray / sCallSection …) では _.h も _pb.h も生成
+	# されないので、無条件に OUTPUT へ並べると「出力が存在しない」= 常に dirty
+	# となり、毎回そのぶんの codegen が走る。宣言はソースを見て切り替える。
+	set(gen_outputs)
+	file(STRINGS ${src} _has_ts LIMIT_COUNT 1 REGEX "CLASS_TINYSTATE")
+	if(_has_ts)
+	  set(gen_outputs ${gen_priv} ${gen_pub})
+	endif()
+	unset(_has_ts)
+
 	add_custom_command(
-		OUTPUT ${stamp_file} ${gen_priv} ${gen_pub}
+		OUTPUT ${stamp_file} ${gen_outputs}
 		COMMAND ${STLCPP}
 		    file
 		    ${src}

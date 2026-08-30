@@ -28,7 +28,10 @@ function(add_tinystate_example)
   foreach(src ${TSE_SOURCES})
     get_filename_component(_abs ${src} ABSOLUTE)
     if(_abs MATCHES "/classes/")
-      string(REPLACE "/" "_" _stamp_name ${_abs})
+      # ':' も潰す (AddTinyStateLibrary.cmake の同じ箇所を参照)。Windows の
+      # 絶対パス C:/... のコロンを残すと stamp が NTFS の代替データストリームに
+      # なり、毎回 codegen 全件が走る。
+      string(REGEX REPLACE "[/:]" "_" _stamp_name ${_abs})
       set(_stamp ${_stamp_dir}/${_stamp_name}.t)
       # Declare tscpp2's generated headers as real OUTPUTs (not just the stamp) so a
       # base-class edit rebuilds dependent subclass objects in ONE incremental pass
@@ -37,8 +40,17 @@ function(add_tinystate_example)
       get_filename_component(_gen_base ${_abs} NAME_WLE)
       set(_gen_priv ${CMAKE_CURRENT_BINARY_DIR}/_ts2/c++/${_gen_base}_.h)
       set(_gen_pub  ${CMAKE_CURRENT_BINARY_DIR}/_ts2/c++/${_gen_base}_pb.h)
+      # tscpp2 が _.h / _pb.h を出すのは CLASS_TINYSTATE のクラスだけ。plain な
+      # クラスで無条件に OUTPUT へ並べると「出力が存在しない」= 常に dirty になり、
+      # 毎回 codegen が走る (AddTinyStateLibrary.cmake の同じ箇所を参照)。
+      set(_gen_outputs)
+      file(STRINGS ${_abs} _has_ts LIMIT_COUNT 1 REGEX "CLASS_TINYSTATE")
+      if(_has_ts)
+        set(_gen_outputs ${_gen_priv} ${_gen_pub})
+      endif()
+      unset(_has_ts)
       add_custom_command(
-        OUTPUT ${_stamp} ${_gen_priv} ${_gen_pub}
+        OUTPUT ${_stamp} ${_gen_outputs}
         COMMAND ${TINYSTATE_TSCPP2} file ${_abs}
                 --baseheader=${CMAKE_CURRENT_BINARY_DIR}
                 --header=_ts2

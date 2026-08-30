@@ -177,6 +177,34 @@ cmake --build example/socktest/build
 
 ---
 
+## 4-1. インストール済みの版を確認する
+
+`cmake` の `PACKAGE_VERSION` は `project(VERSION)` 由来で、リリース候補をまたいでも
+`2.0.0` のまま動かない。**どのビルドが入っているか**は `TS_REVISION` で見る。
+
+```sh
+grep TS_REVISION /usr/local/include/std2/tinyState_config.h
+#   #define TS_REVISION       "v2.0.0-rc15-0-g1a2b3c4"
+```
+
+C++ からは `#include "std2/tinyState_config.h"` で `TS_REVISION` / `TS_VERSION` を参照でき、
+CMake からは `find_package` の後に同じ値が引ける:
+
+```cmake
+find_package(tinyState REQUIRED)
+message(STATUS "built against tinyState ${tinyState_REVISION}")
+```
+
+> `TS_REVISION` は **configure 時に確定する**。既存の build ディレクトリを使い回して
+> `make` / `install` し直しても文字列は更新されないので、版を揃えたいときは
+> `cmake -B <dir> .` からやり直すこと。
+>
+> `git` チェックアウトでも `git archive` 生成でもないソース (`.git` を除いた作業ツリーを
+> `rsync`/`scp` した等) から建てた場合は `"unknown"` になる。誤った版を名乗るよりは、
+> 分からないと言う方を選んでいる。
+
+---
+
 ## 5. 自作アプリの CMakeLists
 
 example と同じ 3 行で済む:
@@ -226,6 +254,17 @@ cmake -B build -DTINYSTATE_BUILD_SHARED=ON .
   ```
 
   静的ビルドはリンクが起きないので従来どおり universal のままでよい。
+
+* **macOS で `library 'gmp' not found` になったら**、リンカに Homebrew の lib を
+  教える。CGAL の find が GMP をフルパスで返すか裸の名前 (`-lgmp`) で返すかは
+  configure ごとに揺れ、後者になるとリンカは `/opt/homebrew/lib` を見に行かない。
+
+  ```sh
+  cmake -B build -DTINYSTATE_BUILD_SHARED=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
+        -DCMAKE_SHARED_LINKER_FLAGS="-L/opt/homebrew/lib" .
+  ```
+
+  `CMAKE_PREFIX_PATH=/opt/homebrew` では効かない。静的ビルドは無関係。
 
 ### `find_package` から共有版を選ぶ
 

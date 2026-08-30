@@ -10,6 +10,22 @@
 
 get_filename_component(TINYSTATE_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 
+# --- which build of tinyState is this? ------------------------------------
+# PACKAGE_VERSION (tinyStateConfigVersion.cmake) carries project(VERSION) and so
+# reads "2.0.0" for every release candidate alike; it is deliberately left that
+# way, since putting an rc suffix there would upset find_package's version
+# comparison for existing callers.  This is the field that actually identifies
+# the build: the `git describe` string captured when tinyState was configured.
+#
+#   find_package(tinyState REQUIRED)
+#   message(STATUS "built against tinyState ${tinyState_REVISION}")
+#
+# "unknown" means tinyState was built from a source tree that was neither a git
+# checkout nor produced by `git archive`.  Like TS_REVISION in
+# std2/tinyState_config.h (the same value), it is fixed at *configure* time —
+# rebuilding an existing build directory does not refresh it.
+set(tinyState_REVISION "@TS_REVISION@")
+
 include(CMakeFindDependencyMacro)
 if(NOT WIN32)
   # POSIX / Cygwin link against pthread (Threads::Threads).  Native Windows

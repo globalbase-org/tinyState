@@ -15,10 +15,27 @@ include(GNUInstallDirs)
 #
 # In addition, a `git describe` string (nearest tag + commits-since + short
 # hash + -dirty) is captured at *configure* time as build metadata and embedded
-# as TS_REVISION.  This replaces the old SVN-based utils/version.pl.  Outside a
-# git checkout (release tarball) it degrades to "unknown" and the build still
-# works.  Note: the snapshot is taken at configure, so commits/edits made after
-# `cmake -B build .` are not reflected until the next configure.
+# as TS_REVISION.  This replaces the old SVN-based utils/version.pl.  Note: the
+# snapshot is taken at configure, so commits/edits made after `cmake -B build .`
+# are not reflected until the next configure.
+#
+# Resolved in three steps, because not every source tree is a git checkout:
+#
+#   1. a .git directory  -> ask git.  Most accurate: picks up -dirty too.
+#   2. cmake/git-revision.in  -> written by `git archive` via export-subst
+#      (.gitattributes), so release tarballs and the tarballs GitHub generates
+#      for a Release carry the revision even though they have no .git.  We
+#      check for a leftover "$Format:" to tell a substituted file from the
+#      placeholder sitting in the working tree.
+#   3. neither  -> "unknown".  A tree copied without .git and not produced by
+#      git archive has the information nowhere; say so rather than guess.
+#
+# Step 2 normalises to the same shape step 1 produces.  git archive only offers
+# %(describe:tags) — the long form is not available there — so it yields
+# "v2.0.0-rc15" where git describe --long yields "v2.0.0-rc15-0-g<hash>".  The
+# placeholder file carries %H as well and we rebuild the long form from it, so
+# the same commit reports the same string however the source arrived.  A field
+# used to match provenance is useless if its shape depends on the transport.
 find_package(Git QUIET)
 set(TS_REVISION "unknown")
 if(GIT_FOUND AND EXISTS ${PROJECT_SOURCE_DIR}/.git)
@@ -31,6 +48,32 @@ if(GIT_FOUND AND EXISTS ${PROJECT_SOURCE_DIR}/.git)
   if(TS_REVISION STREQUAL "")
     set(TS_REVISION "unknown")
   endif()
+endif()
+if(TS_REVISION STREQUAL "unknown" AND EXISTS ${PROJECT_SOURCE_DIR}/cmake/git-revision.in)
+  file(READ ${PROJECT_SOURCE_DIR}/cmake/git-revision.in _ts_rev_raw)
+  if(NOT _ts_rev_raw MATCHES "\\$Format:")
+    string(REGEX MATCH "describe:[ \t]*([^\n\r]*)" _m "${_ts_rev_raw}")
+    set(_ts_desc "${CMAKE_MATCH_1}")
+    string(REGEX MATCH "commit:[ \t]*([0-9a-f]+)" _m "${_ts_rev_raw}")
+    set(_ts_hash "${CMAKE_MATCH_1}")
+    string(STRIP "${_ts_desc}" _ts_desc)
+    if(_ts_desc)
+      if(NOT _ts_desc MATCHES "-g[0-9a-f]+$" AND _ts_hash)
+        # exactly on a tag: git archive drops the "-0-g<hash>" that --long adds
+        string(SUBSTRING "${_ts_hash}" 0 7 _ts_short)
+        set(TS_REVISION "${_ts_desc}-0-g${_ts_short}")
+      else()
+        set(TS_REVISION "${_ts_desc}")
+      endif()
+    elseif(_ts_hash)
+      string(SUBSTRING "${_ts_hash}" 0 7 TS_REVISION)
+    endif()
+  endif()
+  unset(_ts_rev_raw)
+  unset(_ts_desc)
+  unset(_ts_hash)
+  unset(_ts_short)
+  unset(_m)
 endif()
 message(STATUS "tinyState ${PROJECT_VERSION} (${TS_REVISION})")
 
@@ -283,8 +326,12 @@ write_basic_package_version_file(
   ${CMAKE_BINARY_DIR}/tinyStateConfigVersion.cmake
   VERSION ${PROJECT_VERSION}
   COMPATIBILITY SameMajorVersion)
+configure_file(
+  ${PROJECT_SOURCE_DIR}/cmake/tinyStateConfig.cmake.in
+  ${CMAKE_BINARY_DIR}/tinyStateConfig.cmake
+  @ONLY)
 install(FILES
-  ${PROJECT_SOURCE_DIR}/cmake/tinyStateConfig.cmake
+  ${CMAKE_BINARY_DIR}/tinyStateConfig.cmake
   ${PROJECT_SOURCE_DIR}/cmake/AddTinyStateExample.cmake
   ${CMAKE_BINARY_DIR}/tinyStateConfigVersion.cmake
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/tinyState)

@@ -105,7 +105,10 @@ int id;
 			refList[id] = this;
 		}
 		if ( id == 0 ) {
-			refCond.signal();
+			/* broadcast であって signal ではない。待ち手が gc_thread と wait_stable()
+			 * の 2 者いるため、1 本しか起こさないと「仕事が残っているのに gc が
+			 * 寝たまま」という相互永眠になりうる。 */
+			refCond.broadcast();
 			return;
 		}
 	}
@@ -121,7 +124,7 @@ int id;
 			refFlags[nxt] |= mask;
 			id = nxt;
 			if ( id == 0 )
-				refCond.signal();
+				refCond.broadcast();	/* 上と同じ理由で broadcast */
 		}
 	}
 }
@@ -139,6 +142,32 @@ pthread_t		phy_thread;
 	pthread_attr_init(&phy_attr);
 	pthread_attr_setdetachstate(&phy_attr,PTHREAD_CREATE_DETACHED);
 	pthread_create(&phy_thread,&phy_attr,stdObject::gc_thread,(void*)0);
+}
+
+/* 安定 (refList / refFlags / refEvent がすべて空) になるまで眠って待つ。起こすのは
+ * gc_thread が idle へ入る直前に出す「安定へ遷移した」broadcast。
+ *
+ * これは tsThread の teardown ゲートのためにある。あのゲートが本当に待っているのは
+ *
+ *	ready->count == 0  &&  run->count == 0  &&  is_stable()
+ *
+ * の 3 つが *同時に* 成立することだが、そこには相反がある。前の 2 つは pool の mtx を
+ * 持たなければ読めない = その中で待ちたくない。一方 is_stable() は true になる瞬間を
+ * 捉えられない (ポーリングすると、そのポーリング自身が生む配送が条件を false へ戻す)。
+ *
+ * そこで is_stable() の待ちだけをロックの外へ出す。ここを脱したということは少なくとも
+ * 一度は安定していたということで、3 条件の同時成立は tsThread::finish() が mtx の下で
+ * 念押しする。is_stable() が true であることはこのゲートを抜ける必要条件なので、
+ * ここで待ち続けても先に進めるものを止めてはいない。
+ *
+ * 待っている間 fwIO は回らないが、gc は必ず終わる。並列だったものが直列になるだけで、
+ * 止まりはしない。 */
+void
+stdObject::wait_stable()
+{
+doLOCK_ID(0);
+	for ( ; !( refList[0] == 0 && refFlags[0] == 0 && refEventHead[0] == 0 ) ; )
+		refCond.wait(refMtx[0]);
 }
 
 void
@@ -200,6 +229,11 @@ stdObject::gc_thread(void * arg)
 	for ( ; ; ) {
 		{
 		doLOCK_ID(0)
+			/* 「安定へ遷移した」を wait_stable() へ知らせる。元々このクラスには
+			 * 「仕事が増えた」通知しかなく、減って空になったことを告げる口が無かった。
+			 * これが無いと wait_stable() を起こす者が誰も居らず永眠する。 */
+			if ( refList[0] == 0 && refFlags[0] == 0 && refEventHead[0] == 0 )
+				refCond.broadcast();
 			for ( ; refList[0] == 0 && refFlags[0] == 0 ; ) {
 				if ( finish_flag ) {
 				  	finish_flag = 2;

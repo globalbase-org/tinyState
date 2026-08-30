@@ -47,6 +47,12 @@ public:
 	 *  queued for delete and no refEvent (auto-teardown) callbacks pending.  Used by
 	 *  tsThread teardown to know refEvent can no longer fire before it frees the pool. */
 	static int is_stable();
+	/** @brief Sleep until is_stable() holds — 安定になるまで眠って待つ
+	 *  @details Woken by the gc thread's broadcast as it goes idle.  Used by teardown to
+	 *  wait for stability *outside* the pool mutex; see the comment on the definition. /
+	 *  gc スレッドが idle へ入る際の broadcast で起きる。teardown が pool の mutex の
+	 *  外で安定を待つために使う。理由は定義側のコメント参照。 */
+	static void wait_stable();
 protected:
 	virtual void refEvent() {};
 	void nRefEvent(int obs);
