@@ -14,7 +14,8 @@ stdLimitSemaphore::stdLimitSemaphore(int lim)
 	 * 先に待っていた側を追い越す。enablePriority を立てると priority() の既定値 10000 が
 	 * 全員同じキーになるので、これを立てないと待ち行列が LIFO になり先着が飢える。
 	 * insNeq=1 なら「同キーの後ろ」に入るので、優先度が違えば優先度順・同じなら先着順。
-	 * enablePriority が偽のときは key=MAX_INTEGER64 の末尾追加経路に入るので参照されない。 */
+	 * enablePriority が偽のときは key=MAX_INTEGER64 の末尾追加経路に入るので参照されない。
+	 * 利用側がこの既定を変えたいときは insNeq(0) を呼ぶ。 */
 	this->wait->insNeq = 1;
 }
 
@@ -80,6 +81,28 @@ sPtr<tinyState>  obj;
 	obj = this->wait->del();
 	if ( obj.is_notNull() )
 		obj->wakeup();
+}
+
+void
+stdLimitSemaphore::insNeq(int v)
+{
+sPtr<tinyState> me;
+	me = sCallSection::key->caller();
+sThreadMutexHandle __hdr(me->application->mtx);
+	if ( this->wait == thNULL )
+		return;
+	this->wait->insNeq = ( v != 0 );
+}
+
+int
+stdLimitSemaphore::insNeq()
+{
+sPtr<tinyState> me;
+	me = sCallSection::key->caller();
+sThreadMutexHandle __hdr(me->application->mtx);
+	if ( this->wait == thNULL )
+		return 1;
+	return this->wait->insNeq;
 }
 
 int

@@ -21,6 +21,15 @@ TS_BEGIN_IMPLEMENT
  *   1. 入場順が priority について非減少であること
  *   2. 同じ priority の worker どうしは、<b>観測した到着順</b>と同じ順で入場すること
  *
+ * これを 2 相走らせて、同点の入り方 (insNeq) の両方を見る。
+ *
+ *   相 1  insNeq(1) — 既定。同点は到着順
+ *   相 2  insNeq(0) — 同点は到着順の<b>逆</b>
+ *
+ * 不変条件 1 は insNeq に依らず成り立つ。2 だけが相によって向きが変わるので、
+ * 判定の向きを相で切り替える。両相を通すことで「insNeq が実際に効いている」
+ * ことが言える — 片方だけなら、フラグが無視されていても通ってしまう。
+ *
  * 2 を「到着順 = 生成順」と決め打つと、テストが自分では測っていない仮定 (thNEW した順に
  * 状態機械がスケジュールされる) に乗ることになる。その仮定が崩れた日に落ちても、実装が
  * 壊れたのかテストの前提が崩れたのかを区別できない。だから worker には自分が待ちキューに
@@ -50,6 +59,14 @@ static int pri[NW] = { 10000, 100, 10000, 100, 50 };
 int arrival[NW]; int narrival = 0;	/* 待ちキューに並んだ順 (worker が自分で記録) */
 int entry[NW];   int nentry   = 0;	/* セマフォを取れた順 */
 int sempri_fail = 0;
+
+/* 相: 0 = insNeq(1) 同点は到着順 / 1 = insNeq(0) 同点は逆順 */
+static int phase = 0;
+static const int phase_insneq[2] = { 1, 0 };
+static const char * phase_name[2] = {
+	"insNeq(1) — ties keep arrival order",
+	"insNeq(0) — ties reverse arrival order",
+};
 
 void
 record_arrival(int name)
@@ -91,13 +108,22 @@ TS_STATE(ACT_START)
 TS_PRIVATE(sPtr<stdLimitSemaphore> sem;)
 TS_PRIVATE(sTimer timer;)
 int i;
+	narrival = 0;
+	nentry   = 0;
 	sem = thNEW(stdLimitSemaphore,(1));
 	sem->enablePriority = 1;
-	::printf("=== stdLimitSemaphore enablePriority ===\n");
+	sem->insNeq(phase_insneq[phase]);
+	::printf("=== phase %d: %s ===\n", phase+1, phase_name[phase]);
+	if ( sem->insNeq() != phase_insneq[phase] ) {
+		::printf("*** FAILED: insNeq(%d) did not take (reads back %d)\n",
+			 phase_insneq[phase], sem->insNeq());
+		sempri_fail = 1;
+		return rDO | FIN_START;
+	}
 	::printf("%d workers, priorities", NW);
 	for ( i = 0 ; i < NW ; i++ )
 		::printf(" %d", pri[i]);
-	::printf(" (smaller enters first; ties keep arrival order)\n");
+	::printf(" (smaller enters first)\n");
 	sem->get();			/* main が先に占有 → 以後の worker は全員待ちに入る */
 	for ( i = 0 ; i < NW ; i++ )
 		thNEW(hwWorker,(ifThis,sem,i,pri[i]));
@@ -141,23 +167,50 @@ int i, j;
 			sempri_fail = 1;
 		}
 
-	/* 不変条件 2: 同じ priority どうしは到着順を保つ */
+	/* 不変条件 2: 同じ priority どうしの相対順。
+	 * insNeq(1) なら到着順を保ち、insNeq(0) なら反転する。i が j より先に到着した
+	 * 組だけを見て、期待する側が先に入場しているかを検査する。 */
 	for ( i = 0 ; i < NW ; i++ )
 		for ( j = 0 ; j < NW ; j++ ) {
 			if ( i == j || pri[i] != pri[j] )
 				continue;
 			if ( pos(arrival,narrival,i) >= pos(arrival,narrival,j) )
-				continue;
-			if ( pos(entry,nentry,i) < pos(entry,nentry,j) )
-				continue;
-			::printf("*** FAILED: w%d and w%d are both priority %d; "
-				 "w%d arrived first but w%d entered first\n",
-				 i, j, pri[i], i, j);
+				continue;	/* i が先に到着した組だけ見る */
+		int i_first = ( pos(entry,nentry,i) < pos(entry,nentry,j) );
+			if ( phase_insneq[phase] ) {
+				if ( i_first )
+					continue;
+				::printf("*** FAILED: w%d and w%d are both priority %d; "
+					 "w%d arrived first but w%d entered first\n",
+					 i, j, pri[i], i, j);
+			}
+			else {
+				if ( ! i_first )
+					continue;
+				::printf("*** FAILED: w%d and w%d are both priority %d; "
+					 "w%d arrived first and still entered first "
+					 "(insNeq(0) should have reversed them)\n",
+					 i, j, pri[i], i, j);
+			}
 			sempri_fail = 1;
 		}
 
-	if ( ! sempri_fail )
-		::printf("*** OK — priority non-decreasing, ties in arrival order ***\n");
+	if ( sempri_fail )
+		return rDO | FIN_START;
+	::printf("  phase %d OK\n", phase+1);
+	if ( phase == 0 ) {
+		phase = 1;
+		sem = thNULL;		/* 相 1 の worker が畳み終わるのを待ってから次へ */
+		timer.start(ifThis,200*1000);
+		return ACT_NEXT_PHASE;
+	}
+	::printf("*** OK — priority non-decreasing; ties honour insNeq in both directions ***\n");
 	return rDO | FIN_START;
+}
+TS_STATE(ACT_NEXT_PHASE)
+{
+	if ( ! timer.is_expire(ifThis) )
+		return 0;
+	return rDO | ACT_START;
 }
 TS_STATE(FIN_START) { sem = thNULL; return rDO | FIN_TINYSTATE_START; }

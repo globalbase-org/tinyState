@@ -640,7 +640,7 @@ tsThread_::__tsThread_body(void * arg)
 		sPtr<tsThread_> THIS = sPtr<tsThread_>((tsThread_*)arg);
 		THIS->__tsThread_body();
 	}	/* ★ ここで THIS のデストラクタ = tsThread_ への最後の relref が走る(refMtx 生存中)。
-	 * メンバ本体内の target/prev_target の relref もこの内側ブロック内で完了済み。 */
+	 * メンバ本体内の target の relref もこの内側ブロック内で完了済み。 */
 	__sync_fetch_and_sub(&tsThreadLiveWorkers,1);	/* ★ 全 tail relref 完了後・絶対最後。以降は return のみ(静的状態に触れない) */
 	return 0;
 }
@@ -651,7 +651,6 @@ void
 tsThread_::__tsThread_body()
 {
 sPtr<stdThreadInfo> target;
-sPtr<stdThreadInfo> prev_target;
 int crt;
 
 
@@ -662,7 +661,6 @@ int crt;
 		for ( ; ; ) {
 			if ( targetRunThreads < currentRunThreads )
 				break;
-			prev_target = target;
 			target = ready->del();
 			if ( target == thNULL ) {
 				if ( thread_stop )

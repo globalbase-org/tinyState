@@ -91,6 +91,36 @@ public:
 	 * 新しい上限が大きい場合、増えた空き枠の分だけ待ちキューを起こす。
 	 */
 	void limit(int lim);
+	/**
+	 * @brief Set how equal-priority waiters are ordered — 同じ優先度の待ち手の並べ方を設定する
+	 * @param[in] v 1 = arrival order (default) / 0 = reverse arrival order
+	 *              1 = 到着順 (既定) / 0 = 到着順の逆
+	 * @details Only observable while #enablePriority is set: with it clear, get()
+	 * appends to the tail and this flag is not consulted.
+	 *
+	 * <b>The default is 1</b>, which is what makes the #enablePriority contract hold —
+	 * turning that flag on without overriding tinyState::priority() anywhere leaves
+	 * behaviour unchanged, because every waiter ties at TS_DEFAULT_PRIORITY and ties
+	 * keep arrival order.  Set this to 0 and those same ties invert, so a stream of
+	 * equal-priority waiters serves the newest first and the earliest arrival starves.
+	 * Only choose 0 when the ties are meaningful to you and you want the newest first.
+	 *
+	 * #enablePriority が立っているときだけ効く。倒れているときの get() は末尾追加なので
+	 * このフラグを見ない。
+	 *
+	 * <b>既定は 1</b>。#enablePriority の契約 —「priority() をどこも override せずに
+	 * フラグだけ立てても挙動は既定と同じ」— はこれが支えている。全員が
+	 * TS_DEFAULT_PRIORITY で同点になり、同点が到着順を保つからである。0 にすると
+	 * その同点が反転するので、同じ優先度の待ち手が並び続ける状況では新しいものから
+	 * 順に入場し、<b>最初に来た待ち手が飢える</b>。同点に意味があって新しい順に
+	 * 入れたいときだけ 0 を選ぶこと。
+	 */
+	void insNeq(int v);
+	/**
+	 * @brief Get how equal-priority waiters are ordered — 同じ優先度の待ち手の並べ方を取得する
+	 * @return 1 = arrival order / 0 = reverse arrival order / 到着順 = 1・逆順 = 0
+	 */
+	int insNeq();
 private:
 	/** @brief Upper limit — 上限値
 	 */
