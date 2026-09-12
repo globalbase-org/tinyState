@@ -1,8 +1,8 @@
 /*
  * hwTsChild — a *tinyState* child process that reads its stdin through the
  * framework (s2IOstd -> ts2IOdescriptor overlapped read + IOCP), exactly as a
- * real tinyState agent (e.g. cgalp's) does — as opposed to the plain _read()
- * helpers (echo1/count1) that a shell child like `sort` uses.
+ * real tinyState agent in a consumer application does — as opposed to the
+ * plain _read() helpers (echo1/count1) that a shell child like `sort` uses.
  *
  * It counts every byte on stdin until EOF, then writes "COUNT=<n>\n" to stdout.
  * Spawned by systest Phase E (SYSTEST_BIG_EXE=<this>.exe) it verifies whether

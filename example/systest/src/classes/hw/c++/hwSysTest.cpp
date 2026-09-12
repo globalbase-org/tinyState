@@ -100,13 +100,13 @@ TS_STATE(ACT_B_READ) {
 }
 
 /* ------------------------------------------------------------------ *
- * Phase E : parent -> *tinyState* child (overlapped-read regression guard).  *
+ * Phase E : parent -> *tinyState* child (overlapped-read guard).       *
  * Unlike a shell child (plain synchronous _read), a tinyState child    *
  * reads its stdin through s2IOstd -> ts2IOdescriptor (overlapped       *
  * ReadFile + IOCP).  On MinGW that only works if ts2System created the *
- * child pipe end OVERLAPPED — the overlapped-child-pipe fix.  Child = the `tschild`*
- * companion (reads stdin to EOF, prints COUNT=<n>).  cgalp sends via   *
- * set_divisible(), so mirror that here.                                *
+ * child pipe end OVERLAPPED — the overlapped-child-pipe fix.  Child =  *
+ * the `tschild` companion (reads stdin to EOF, prints COUNT=<n>).  A   *
+ * consumer sends via set_divisible(), so mirror that here.             *
  * Opt-in: SYSTEST_BIG_EXE=<tschild path>; SYSTEST_BIG_BYTES (def 131072).*
  * ------------------------------------------------------------------ */
 TS_STATE(ACT_E_START) {
@@ -120,7 +120,7 @@ TS_STATE(ACT_E_START) {
 	snprintf(cmd,sizeof(cmd),"#%s",exe);
 	sys = thNEW(ts2System,(ifThis,&retPid,cmd,&rfd,(sPtr<ts2IO>*)0,&wfd));
 	if ( retPid < 0 ) { ::printf("[systest] E: spawn failed\n"); free(bigbuf); bigbuf=0; return rDO|FIN_START; }
-	wfd->set_divisible();					/* the cgalp path (pigfAgent.cpp) */
+	wfd->set_divisible();					/* the consumer's agent path */
 	::printf("[systest] E: sending %d bytes to a tinyState child ...\n",biglen);
 	return rDO|ACT_E_WRITE;
 }

@@ -147,8 +147,8 @@ for ( c = head ; c ; c = c_next ) {
 
 ### 実例
 
-sarExchanger ver.1 での事例。`sarMeasurement` 停止時に、ack 待ちの
-`co_sarMeasurement` を `coo_` リスト walk で `destroy()` していくコードで、
+ある計測アプリでの事例。`appMeasurement` 停止時に、ack 待ちの
+`co_appMeasurement` を `coo_` リスト walk で `destroy()` していくコードで、
 next 未退避だったため 1 個しか畳めず、`co_count` が 0 に落ちず measurement が
 ZOM できずハングした。next 先取りで全ノード破棄され解消。
 
@@ -251,7 +251,7 @@ int main() {
 
 ### 実例
 
-cgal-processor step4 の `ptsWireStreamTest`(キャッシュ往復テスト)。
+ある利用側アプリの、キャッシュ往復テストでの事例。
 並行フェーズの判定状態が reader の TSE_RETURN 同期チェーン(reader のワーカスレッド)上で
 走っており、そこで `::exit(0/1)` していたため、main スレッドの `stdInterval::now()` が
 破壊済み static を触って毎回 SIGSEGV。FIN 抜け + グローバル終了コード方式で解消。
@@ -305,8 +305,8 @@ ps_*_c に保持した bp が無効ポインタ化する。状態関数で read_
 
 ### 実例
 
-cgal-processor `ptsWirePipe::write_record`(ヘッダ/ペイロード分割)、`ptsWireCacheStreamReader`
-(rhdr/rpayload をメンバ化、ACT_HDR / ACT_PAYLOAD で read_c を 1 回ずつ)。
+ある利用側アプリの wire pipe の `write_record`(ヘッダ/ペイロード分割)、および同アプリの
+キャッシュ往復 reader(rhdr/rpayload をメンバ化、ACT_HDR / ACT_PAYLOAD で read_c を 1 回ずつ)。
 
 ---
 
@@ -388,8 +388,8 @@ sPicoState(§7)が安全に再開する。送信失敗(相手が閉じた等)の
 
 ### 実例
 
-cgal-processor `pigfAgent`(ACT_HELLO は TSE_ASSERT を検出して SENDOP へ遷移するだけ。C_OP / C_ARG_END /
-wend は ev 非依存の SENDOP / SENDEND / SENDWEND で 1 回ずつ送る)、`ptsAgentStub`(WRITING 検出 →
+ある利用側アプリのエージェント基底(ACT_HELLO は TSE_ASSERT を検出して SENDOP へ遷移するだけ。C_OP / C_ARG_END /
+wend は ev 非依存の SENDOP / SENDEND / SENDWEND で 1 回ずつ送る)、そのスタブ(WRITING 検出 →
 SAVEBEGIN/SAVEDONE/SAVEBYE/SAVEWEND)。
 
 ---
@@ -435,7 +435,7 @@ void Foo_::write_record(...) {
 
 ### 実例
 
-cgal-processor `ptsWirePipe::write_record`(複数の引数送信ワーカーが同じ pipe の write_record を
+ある利用側アプリの wire pipe の `write_record`(複数の引数送信ワーカーが同じ pipe の write_record を
 並行に呼ぶため、wlock + wrHolder で 1 レコード単位を不可分化)。
 
 ---
@@ -460,17 +460,17 @@ codegen 自体は通る(状態ゼロの派生も可)。だが基底 `Parent` が
 派生の .cpp に、<b>基底が持つ `sPtr<不完全型>` メンバの完全型ヘッダを include</b>する。
 
 ```cpp
-// pigfCgalpAgent.cpp(基底 pigfAgent の sPtr メンバを完全型に)
+// 派生エージェントの .cpp(基底エージェントの sPtr メンバを完全型に)
 #include "ts2/c++/ts2System.h"
 #include "ts2/c++/ts2Parallel.h"
 #include "ts2/c++/ts2IO.h"
-#include "pig/c++/ptsWirePipe.h"
-#include "pig/c++/ptsWireCacheStreamReaderText.h"
+#include "app/c++/appWirePipe.h"
+#include "app/c++/appWireCacheStreamReaderText.h"
 ```
 
 ### 実例
 
-cgal-processor `pigfCgalpAgent`(基底 `pigfAgent` の ts2System / ptsWirePipe / ts2Parallel /
+ある利用側アプリの派生エージェント(基底エージェントの ts2System / wire pipe / ts2Parallel /
 reader / ts2IO メンバ用に完全型 include)。
 
 ---
