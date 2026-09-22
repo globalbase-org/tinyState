@@ -6,6 +6,7 @@
 #include	"ts2/c++/sThreadMutexRecursive.h"
 #include	"ts2/c++/sThreadMutexHandleRelease.h"
 #include	"ts2/c++/sCallSection.h"
+#include	"ts2/c++/tsProbe.h"	/* 撤収プローブ: 撤収中に積みに来た相手を記録する */
 
 CLASS_TINYSTATE(tinyState,)
 
@@ -451,9 +452,27 @@ tinyState_::realTimeLimit(sPtr<tinyState>  caller)
 
 
 
+/* TS_SELF_GUARD — 自分を生かしておくピン。
+ *
+ * eventHandler() の中で listener へ TSE_DESTROY が配送され、その先で自分を指す最後の
+ * ハンドルが落とされることがある (sPtr::operator-> は addref しないので、p->destroy() の
+ * p 自身が消え得る)。eventHandler 自身は sCallSectionNode が ifThis を強参照するため
+ * 生き延びるが、そこから戻った後の THR_KILL(SIGPIPE) → thrKill() →
+ * sThreadMutexHandle(lm) が解放済みの lm を叩いていた。
+ *
+ * ★ interface (ifThis) を取ること。tinyState_ の this は impl 側で、interface は impl を
+ *    強参照するが逆は sWptr なので、sPtr(this) では interface の死を止められない。
+ * ★ 宣言はこの関数の先頭 = 下の sThreadMutexHandle より前でなければならない。ローカルは
+ *    逆順に壊れるので、後ろに置くとピンが先に落ちて unlock が UAF になる。
+ *
+ * 他の listener 系 (remove_listener / remove_handle / clean_stdEventHandle /
+ * stdEventHandle::remove) は「外部呼び出しを末尾へ寄せ、以後 this を触らない」構造に
+ * 直したのでピンは要らない。destroy() だけは THR_KILL を eventHandler の後に置くこと
+ * 自体が目的なので、構造では消せずここだけピンで受ける。 */
 void
 tinyState_::destroy(int delayFlag)
 {
+TS_SELF_GUARD;
 	{
 	sThreadMutexHandle __hdr(lm);
 		if ( destroy_stop )
@@ -676,8 +695,17 @@ int do_ins = 0;
 		if ( C_TEST(st0,C_ZOM) )
 			return 0;
 		_insEvent(ev);
-		if ( this->state_lock )
+		if ( this->state_lock ) {
+			/* A non-null _thrInfo means this call IS the pool's dispatch -- the
+			   worker has already taken us off its queue.  Turning it into a mere
+			   event would leave thrQueueing_flag claiming "the pool has me", so
+			   the thread that owns state_lock parks on the TS_THREAD state and
+			   nobody ever ins() again.  Retract the claim: the next evaluation
+			   of the state queues us afresh. */
+			if ( _thrInfo != thNULL )
+				this->thrQueueing_flag = 0;
 			return 0;
+		}
 		this->state_lock = 1;
 		thrInfo = _thrInfo;
 		sCallSection::key->push(&csn);
@@ -784,8 +812,44 @@ int do_ins = 0;
 	 * (しかも lm 外の読み出しなので、別スレッドが thrInfo を書くと起床を
 	 * 取りこぼす側に倒れた)。 */
 	this->invoke_state();
-	if ( do_ins )
-		application->getThread()->ins(ifThis);	/* ins() がプールを起こす */
+	if ( do_ins ) {
+	sPtr<tsThread>  th;
+		/* ★ ここは撤収中に両方とも thNULL になり得る。sPtr::operator-> は null 検査を
+		 * しないので、素で書くと落ちる。
+		 *
+		 *   application  … すぐ上の ZOM 分岐でこの dispatch 中に thNULL にされる
+		 *   getThread()  … tsApplication の FIN_THREAD_ROOT_LOOP が threadQueue を
+		 *                  thNULL にした後 (tsApplication.cpp:301 / 319)
+		 *
+		 * 後者は実測されている。gc スレッドが dying object の refEvent を配送し、
+		 * そこから状態機械が C_THR 状態へ入ってここに来る:
+		 *
+		 *   #0 sPtr<tsThread_>::operator->   #1 tsThread::ins (this=0x0)
+		 *   #2 eventHandler  #3 refEvent  #4.. stdObject::gc  gc_thread
+		 *
+		 * tsThread_::ins() 側の防御 (ready が thNULL なら積まない) には**到達しない**。
+		 * interface の forwarder が this=0x0 で落ちるので、プール本体に入る前。
+		 *
+		 * プールが無い = この TS_THREAD 状態は走らない。捨てるしかないが黙っては捨てず、
+		 * 誰の仕事だったかを名指しする。撤収を止めない理由は tsThread_::ins() のコメント
+		 * (gc の終了条件に載らないので is_stable() は真になる) と同じ。 */
+		if ( application.is_notNull() )
+			th = application->getThread();
+		if ( th.is_notNull() )
+			th->ins(ifThis);		/* ins() がプールを起こす */
+		else {
+			/* 窓 C = プールそのものが既に無い。ここも「積みに来た側」なので、
+			 * 有効なら素性とスタックを固定しておく (撤収プローブ)。 */
+			if ( tsProbeTeardown_enabled() )
+				tsProbeTeardown(ifThis,"C",
+					application.is_null()
+						? "pool=gone (application cleared)"
+						: "pool=gone (threadQueue folded)");
+			::printf("tinyState: no thread pool for this TS_THREAD state"
+				" — it will not run\n");
+			this->printParent();
+		}
+	}
 
 	return 0;
 }
@@ -834,30 +898,57 @@ sThreadMutexHandle __hdr(lm);
 }
 
 
+/* 外部呼び出し (listener 側の remove_handle) は lm を放した後の末尾に置く。それ以降
+ * this を触らない — sThreadMutexHandle の unlock も含めて — ので、この取り外しで自分の
+ * 最後の参照が落ちても安全に抜けられる。eventHandler 末尾と同じ規律。
+ *
+ * eh->listener は stdEventHandle::remove() 経由なら既に thNULL で、その場合 listener 側は
+ * remove() 自身が外す。直接呼ばれた場合 (public API) は従来どおりここが両端を外す。
+ *
+ * check_listener はツリー内のどこでも代入されていない = 常に偽だった。ここの読み出しは
+ * 上記の規律 (lm 下で外を呼ばない) と両立しないので落とす。add_listener 側の読み出しは
+ * 残置 — あちらは構造上安全で、この変更の対象ではない。member 自体の扱いは別途。 */
 void
 tinyState_::remove_listener(sPtr<stdEventHandle>  eh)
 {
-sThreadMutexHandle __hdr(lm);
-	if ( this->event_listener[eh->type].is_notNull() )
-		this->event_listener[eh->type]->del(eh,0);
-	eh->listener->remove_handle(eh);
-	if ( check_listener )
-		wakeup();
+sPtr<tinyState>  lsn;
+	{
+	sThreadMutexHandle __hdr(lm);
+		if ( this->event_listener.length() &&
+				this->event_listener[eh->type].is_notNull() )
+			this->event_listener[eh->type]->del(eh,0);
+		lsn = eh->listener;
+	}
+	if ( lsn.is_notNull() )
+		lsn->remove_handle(eh);
 }
 
+/* eh 指定は自分のリストを触るだけの葉。eh == thNULL の全掃除は、lm の下でリストを
+ * 丸ごと引き取ってから lm を放し、その後 this を触らずに回す。
+ *
+ * 旧実装は lm を保持したまま eh->source->remove_listener() を呼び、毎周
+ * this->handle_list を読み直していた。最後の 1 本を外した時点で自分の最後の参照が
+ * 落ちると、__hdr のデストラクタが解放済みの lm を unlock する。
+ * ついでに handle_list == thNULL (listen を一度も張っていない) での null 参照も直る。 */
 int
 tinyState_::remove_handle(sPtr<stdEventHandle>  eh)
 {
-sThreadMutexHandle __hdr(lm);
-	if ( eh == thNULL ) {
-		for ( ; this->handle_list->count ; ) {
-			eh = sPtr<stdEventHandle>::d_cast
-				(this->handle_list->check(thNULL,
-				stdQueue<stdEventHandle>::head_stdQueue));
-			eh->source->remove_listener(eh);
-		}
+sPtr<stdQueue<stdEventHandle> >  drained;
+	if ( eh != thNULL ) {
+	sThreadMutexHandle __hdr(lm);
+		if ( this->handle_list.is_notNull() )
+			this->handle_list->del(eh,0);
+		return 0;
 	}
-	else	this->handle_list->del(eh,0);
+	{
+	sThreadMutexHandle __hdr(lm);
+		drained = this->handle_list;
+		this->handle_list = thNULL;
+	}
+	if ( drained == thNULL )
+		return 0;
+	for ( ; (eh = drained->del()).is_notNull() ; )
+		eh->remove();
 	return 0;
 }
 
@@ -871,13 +962,18 @@ sThreadMutexHandle __hdr(lm);
 	this->handle_list->ins(0,eh);
 }
 
+/* get_handle_list() はコピーを返すので lm はその取得だけで足りる。ループを lm の外へ
+ * 出すと以降 this を触らずに済み (unlock も済んでいる)、最後のハンドルを外した時点で
+ * 自分の最後の参照が落ちても安全に抜けられる。 */
 void
 tinyState_::clean_stdEventHandle(int type)
 {
 sPtr<stdQueue<stdEventHandle> >  q;
 sPtr<stdEventHandle>  hdr;
-sThreadMutexHandle __hdr(lm);
-	q = get_handle_list(type);
+	{
+	sThreadMutexHandle __hdr(lm);
+		q = get_handle_list(type);
+	}
 	if ( q == thNULL )
 		return;
 	for ( ; (hdr = q->del()).is_notNull() ; )

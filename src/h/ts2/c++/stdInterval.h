@@ -5,6 +5,7 @@
 
 #include	"ts2/c++/tinyState.h"
 #include	"ts2/c++/sThreadMutex.h"
+#include	"ts2/c++/sImmortal.h"
 
 /**
  * @brief 時刻取得とタイマー待ち機能を提供するユーティリティクラス。/ Utility providing current time and timer-wait for tinyState.
@@ -28,7 +29,7 @@ public:
 	static INTEGER64 now();
 
  protected:
-	static sThreadMutex	m;
+	static sImmortal<sThreadMutex>	m;
 	static INTEGER64	lastAccessTime;
 };
 

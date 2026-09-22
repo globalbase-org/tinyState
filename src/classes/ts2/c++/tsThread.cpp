@@ -3,6 +3,7 @@
 #include	"_ts2/c++/tsThread_.h"
 #include	"ts2/c++/co_tsThreadKill.h"
 #include	"ts2/c++/stdInterval.h"
+#include	"ts2/c++/tsProbe.h"	/* 撤収プローブ: 撤収中に積みに来た相手を記録する */
 
 #define THREAD_TOLL_DULATION		(10*1000*1000)
 #define THREAD_UP_DULATION		(10*1000)
@@ -453,11 +454,83 @@ sPtr<stdQueueElement<stdThread> > elp;
 void
 tsThread_::ins(sPtr<tinyState> inp)
 {
+int folded = 0;
+/* 撤収プローブ。既定 (環境変数なし) では enabled() が 0 を返すのでここは丸ごと死に
+ * コードになる。判定軸を ready の生死ではなく finish_flag にしてあるのは、窓 A —
+ * ラッチ済みだが ready も worker もまだ生きていて ins() が成功してしまう窓 — が
+ * ready.is_null() でも currentRunThreads==0 でも捕まらないため。box で捕獲した
+ * 座り込み個体は、ins() の瞬間 ready も worker も生きていた。 */
+int probing = tsProbeTeardown_enabled();
+char probe_pool[192];
+	probe_pool[0] = 0;
 	{
 	sThreadMutexHandle __hdr(mtx);
-		ready->ins(MAX_INTEGER64,thNEW(stdThreadInfo,(inp)));
-		cond.signal();
-		setRefio();
+		/* FIN_WAIT が畳み終わった後にも ins() は来る。実測された経路は fwIO の配送では
+		 * なく **gc スレッド**で、core の backtrace がこうなっていた:
+		 *
+		 *   tsThread::ins  <- tinyState_::eventHandler  <- tinyState_::refEvent
+		 *   <- stdObject::gc  <- stdObject::gc_thread
+		 *
+		 * refEvent() の自動 teardown が状態機械を動かし、C_THR 状態に入って ins() を
+		 * 呼ぶ。finish() のラッチ条件の is_stable() は「その瞬間 gc が静かだった」で
+		 * あって、以後静かであり続けることは言っていない。⇒ 畳んだ後に ready が
+		 * thNULL のまま ins() されて null 参照で落ちる。Linux Release・systest を
+		 * 8 並列 x 45 で 360 回回して 2 件、core 2 つとも同じ形。
+		 *
+		 * ここでは落とさない。受け取れない仕事なので捨てるしかないが、黙っては捨てず
+		 * 誰の仕事だったかを名指しする (印字は mtx の外。printParent() は相手の lm を
+		 * 取るので、ここで呼ぶと mtx -> lm を持ち込む)。 */
+		if ( ready.is_null() )
+			folded = 1;
+		else {
+			ready->ins(MAX_INTEGER64,thNEW(stdThreadInfo,(inp)));
+			cond.signal();
+			setRefio();
+		}
+		/* プール側のスナップショットは mtx の下で取る。印字はしない
+		 * (tsProbeTeardown() は相手の getStateName() = lm を取るので、mtx を握ったまま
+		 * 呼ぶと mtx -> lm の順序を持ち込む)。 */
+		if ( probing ) {
+			/* probing == 2 は較正モード (TS2_TEARDOWN_PROBE_FORCE)。撤収前の通常の
+			 * ins() まで記録させて、「0 件」を主張する前に検出器が鳴ることを
+			 * 確かめるためのもの。実験では使わない。 */
+			if ( finish_flag == 0 && probing != 2 )
+				probing = 0;
+			else
+				::snprintf(probe_pool,sizeof(probe_pool),
+					"finish_flag=%d ready=%s run=%s refio=%d"
+					" running=%d target=%d workers=%d",
+					(int)finish_flag,
+					ready.is_null() ? "folded" : "live",
+					run.is_null()   ? "folded" : "live",
+					(int)refio,currentRunThreads,targetRunThreads,
+					tsThreadLiveWorkers);
+			if ( probing )
+				probing = finish_flag ? 1 : 2;
+		}
+	}
+	/* 窓 A = ラッチ後だが ins() は成功した (refio が上がり、誰も走らせない)。
+	 * 窓 B = 畳み終わった後なので ins() 自身が拒否した。
+	 * 窓 N = 撤収前の通常の ins() (較正モードでのみ出る)。 */
+	if ( probing )
+		tsProbeTeardown(inp,
+			probing == 2 ? "N" : (folded ? "B" : "A"),probe_pool);
+	if ( folded ) {
+		/* 積まない = その TS_THREAD 状態は走らない = このオブジェクトは ZOM に
+		 * 到達しない。それでも tsApplication の撤収は止まらない:
+		 * stdObject の gc_thread が終了条件に見るのは refList / refFlags /
+		 * refEventHead の 3 つで、「ref > 0 のまま誰にも解放されないオブジェクト」は
+		 * そのどれにも載らない。⇒ is_stable() は真になり stdObject::finish() は抜ける。
+		 * 実害はプロセス終了直前の未回収だけで、そこは OS が回収する。
+		 * (実測: この防御を入れた systest 8 並列 x 45 = 360 回でハング 0 件。
+		 *  止まるなら timeout の rc=124 に出るはずで、出ていない。)
+		 * ★ ただしこれは「安全側に倒しただけ」で、仕事を捨てている事実は変わらない。
+		 *   撤収中にプールが要る設計そのものの見直しは今後の課題。 */
+		::printf("tsThread: ins() after the pool was folded"
+			" — the job is dropped\n");
+		if ( inp.is_notNull() )
+			inp->printParent();
+		return;
 	}
 	/* 積んだことをプールの状態機械に知らせる。mtx の外で呼ぶこと (wakeup は
 	 * 自分の eventHandler に入る)。
@@ -871,6 +944,10 @@ TS_STATE(FIN_DRAINED)
 }
 TS_STATE(FIN_WAIT)
 {
+sPtr<stdQueue<tinyState> >	doomed;		/* 捨てる仕事の持ち主。印字は mtx の外で */
+sPtr<stdQueueElement<stdThreadInfo> >	elp;
+sPtr<tinyState>			t;
+int				rdy, rng;
 
 	if ( currentRunThreads ) {
 		if ( timer.is_expire(ifThis) )
@@ -878,8 +955,56 @@ TS_STATE(FIN_WAIT)
 		return 0;
 	}
 	timer.stop(ifThis);
-	ready = thNULL;
-	run = thNULL;
-	setup_list = thNULL;
+	{
+	sThreadMutexHandle __hdr(mtx);
+		rdy = ready.is_notNull() ? ready->count : 0;
+		rng = run.is_notNull()   ? run->count   : 0;
+		/* 捨てる相手を控えておく。printParent() は getStateName() 経由で相手の lm を
+		 * 取るので、mtx を握ったまま呼んではならない (このファイルに mtx -> lm の
+		 * 順序を持ち込むことになる)。ここでは sPtr を移すだけにする。 */
+		if ( rdy || rng ) {
+			doomed = thNEW( stdQueue<tinyState>,());
+			if ( ready.is_notNull() )
+				for ( elp = ready->head ; elp.is_notNull() ; elp = elp->next )
+					if ( elp->data->target.is_notNull() )
+						doomed->ins(MAX_INTEGER64,elp->data->target);
+			if ( run.is_notNull() )
+				for ( elp = run->head ; elp.is_notNull() ; elp = elp->next )
+					if ( elp->data->target.is_notNull() )
+						doomed->ins(MAX_INTEGER64,elp->data->target);
+		}
+		/* ★ keep-alive を返してから畳む。refio は 1 bit で、立てるのは ins() の
+		 * setRefio() ただ 1 箇所、降ろすのは worker 完了パスの resRefio()
+		 * (下の __tsThread_body) ただ 1 箇所。worker が 0 本ならその完了パスは一度も
+		 * 走らないので、ここで返さないと fwIO の refio が 1 のまま残り、loop() の
+		 * 終了条件 (refio == 0) が永久に成立しない = 反応器が INFINITE のまま戻らない。
+		 * 実機の座り込み個体で ready/run が NULL なのに refio=1 が残っていたのがこれ。
+		 * TIMEOUT を 10 倍 (3000 秒) にしても抜けないことが確認されている。
+		 * resRefio() は refio==0 なら即 return するので無条件に呼んでよい。
+		 * mtx の下で呼ぶのは setRefio() / 既存の resRefio() と揃えるため
+		 * (mtx -> fwIO::mu の順序はこのファイルに既にある)。 */
+		resRefio();
+		/* ★ 畳む操作そのものを mtx の内側でやること。ins() は mtx の下で
+		 * ready.is_null() を見てから ready->ins() するので、ここを mtx の外で
+		 * thNULL にすると、その検査と代入の間に割り込んで null 参照で落ちる。
+		 * 実測: ins() の防御だけ入れて畳みを mtx の外に置いた版で、systest
+		 * 8 並列 x 45 = 360 回中 1 件 SEGV (core の #0 は tsThread::ins のまま)。
+		 * sPtr を thNULL にするだけなので、デストラクタが mtx の下で走ることは
+		 * ない (stdObject::relref は refList に積んで gc_thread に任せる)。 */
+		ready = thNULL;
+		run = thNULL;
+		setup_list = thNULL;
+	}
+	/* 積まれたまま畳むのは「teardown は流し切る」契約に反する。finish() はラッチ済みなら
+	 * 即 1 を返して ready->count を二度と見ず、ラッチ条件の is_stable() は「gc が静か」で
+	 * あって「反応器に配送すべきものが無い」ではないので、配送 -> 状態機械 -> C_THR ->
+	 * ins() の道が残っている。ここは現状それを捨てるしかないが、黙って捨てない。
+	 * 誰の仕事だったかを持ち主の連鎖と状態名つきで出す (2 つめの欠陥)。 */
+	if ( doomed.is_notNull() ) {
+		::printf("tsThread: folding the pool with %d queued / %d running"
+			" job(s) — discarding them\n",rdy,rng);
+		for ( ; (t = doomed->del()).is_notNull() ; )
+			t->printParent();
+	}
 	return rDO|FIN_TINYSTATE_START;
 }

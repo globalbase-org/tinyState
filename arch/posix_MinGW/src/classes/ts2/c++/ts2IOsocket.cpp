@@ -834,8 +834,11 @@ ts2IOsocket_::rio_idle_check()
 	int busy = read_waiters->count || write_waiters->count;
 	INTEGER64 now = stdInterval::now();
 		if ( ! busy && now >= rio_deadline ) {
+			rio_active = 0;		/* clear BEFORE the release: see below */
+			/* last statement -- this drops the one long-lived keep-alive pin, so
+			   it may be the final reference to us.  Nothing may touch `this`
+			   after it, member writes included. */
 			if ( io.is_notNull() ) io->delRefio(ifThis);	/* idle → let the app shut down */
-			rio_active = 0;
 			return;
 		}
 		/* still active: ensure a wakeup lands near the deadline so we re-check.  Re-arm
@@ -1028,13 +1031,6 @@ ts2IOsocket_::rio_teardown()
 		CloseThreadpoolWait(rio_tpwait);
 		rio_tpwait = NULL;
 	}
-	/* Release the single "active" keep-alive if still held (Phase B: the always-posted
-	   receives never held refio, so there is no per-op pin to balance here — just the
-	   one active refio, if a request was recent when destroy hit). */
-	if ( rio_active ) {
-		if ( io.is_notNull() ) io->delRefio(ifThis);
-		rio_active = 0;
-	}
 	/* Drop the table pointer BEFORE closing anything: the delivery is already drained, but
 	   if a callback ever did leak past the wait, rio_on_notify()'s `if (!rio_t) return;`
 	   now stops it instead of letting it dequeue on a closed CQ (belt and braces). */
@@ -1052,6 +1048,18 @@ ts2IOsocket_::rio_teardown()
 	}
 	rio_rq = RIO_INVALID_RQ;					/* released with the socket */
 	if ( rio_event ) { CloseHandle(rio_event); rio_event = NULL; }
+	/* Release the single "active" keep-alive LAST (Phase B: the always-posted receives
+	   never held refio, so there is no per-op pin to balance here — just the one active
+	   refio, if a request was recent when destroy hit).
+	   It has to be last, not first.  The pin it drops may be the final reference to us,
+	   and everything above reads members — the closing sequence used to run after it and
+	   ended in CloseHandle(rio_event), i.e. a handle read out of freed memory.  Keeping
+	   the reactor alive until the RIO resources are actually down is also the order the
+	   dependency wants: the keep-alive exists for exactly this work. */
+	if ( rio_active ) {
+		rio_active = 0;
+		if ( io.is_notNull() ) io->delRefio(ifThis);	/* nothing may touch `this` after */
+	}
 }
 
 

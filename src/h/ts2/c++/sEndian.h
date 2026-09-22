@@ -3,6 +3,8 @@
 #ifndef ___sEndian_cpp_H___
 #define ___sEndian_cpp_H___
 
+#include	"ts2/c++/sImmortal.h"
+
 #include		"ts2/c++/sObject.h"
 
 #define ENDIAN_BIG		1
@@ -35,19 +37,19 @@ public:
 
 	template<typename __TYPE>
 	static __TYPE conv(__TYPE inp,int endian) {
-		if ( cpu == endian )
+		if ( *cpu == endian )
 			return inp;
 		return swap(inp);
 	}
 
 	template<typename __TYPE>
 	static void apply(__TYPE& inp,int endian) {
-		if ( cpu == endian )
+		if ( *cpu == endian )
 			return;
 		swap(inp);
 	}
 
-	static sEndian cpu;
+	static sImmortal<sEndian> cpu;
 protected:
 	union {
 		uint8_t		d8[2];

@@ -335,3 +335,26 @@ install(FILES
   ${PROJECT_SOURCE_DIR}/cmake/AddTinyStateExample.cmake
   ${CMAKE_BINARY_DIR}/tinyStateConfigVersion.cmake
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/tinyState)
+
+
+# ---- 静的デストラクタ禁止の検査 -------------------------------------------
+#
+# tinyState2 は **静的デストラクタを 1 つも登録しない**。破棄順は翻訳単位をまたぐと
+# 未規定で、tinyState は静的同士に依存がある (tsSignalCore_::_signal_list の dtor が
+# stdObject::relref() -> stdObject::refMtx[] を取る)。順序が外れると破棄済みの
+# オブジェクトを触って落ちる。abort() ではローダの DLL detach が直接デストラクタを
+# 走らせるので、アプリ側から順序に介入する手段が無い。⇒ 登録させないことだけが手段。
+#
+# FATAL_ERROR でビルドを止めず **ctest の赤**にしてある。止めると、無関係な作業を
+# している人が前に進めなくなるため。
+#
+# ⚠ 検査自身が「何も測れていない」まま緑になる事故を避けるため、スクリプトは
+#   毎回 canary で較正してから測り、較正に失敗したらその場で落ちる。
+enable_testing()
+add_test(NAME tinyState_no_static_dtor
+  COMMAND sh ${PROJECT_SOURCE_DIR}/test/no_static_dtor.sh
+          ${CMAKE_NM}
+          ${CMAKE_CXX_COMPILER}
+          $<TARGET_FILE:tinyState2>
+          ${PROJECT_SOURCE_DIR}/test/no_static_dtor_allow.txt
+          ${CMAKE_BINARY_DIR}/no_static_dtor)

@@ -22,11 +22,21 @@
  *     torn down with a blocking UnregisterWaitEx in a TS_THREAD FIN state so no
  *     callback can fire after teardown.  destroy() = TerminateJobObject in
  *     filter().  detach() = don't wait.  Windows-port design memo §E.
+ *   - the exit status is normalised into the POSIX wait-status shape before it
+ *     goes out as TSE_RETURN, because that payload means the same thing on every
+ *     platform.  A raw Windows exit code fed to a WEXITSTATUS-style reader reads
+ *     as a signal number or, once folded into an int, as "not exited yet".  A
+ *     Windows exception code (>= 0x10000) is passed through raw and stays
+ *     distinguishable: a POSIX status is only 16 bits wide.  See ts2System.h,
+ *     page ts2system_status.
  *   - NOTE (wine only): closing a process that used IOCP makes wine crash ~0.5-
  *     2.5% at process teardown in its own ntdll (a wine-internal I/O thread
  *     dereferences a NULL TEB); real Windows is 0/1000.  Not our bug.  Windows-port design memo.
  *
- * FIRST CUT (2026-07-12): compiles; run verification pending on the box.
+ * VERIFIED ON THE BOX.  Two faults that only a run could show were found and
+ * fixed on 2026-07-16: a child pipe end has to be created FILE_FLAG_OVERLAPPED
+ * for a tinyState child's overlapped read to ever complete, and this object has
+ * to stay pinned until RegisterWait is unregistered.
  * DM_TTY (pty) is not supported (ConPTY is a later refinement, Windows-port design memo §8).
  */
 
@@ -122,7 +132,11 @@ protected:
 
 	unsigned 	detach_flag:1;
 	unsigned	kill_flag:1;
-	int status;
+	unsigned	poll_fallback:1;	/* RegisterWaitForSingleObject failed: no
+					   callback is coming, poll the handle instead */
+	INTEGER64	status;		/* POSIX wait-status shape, or a raw Windows
+					   exception code (>= 0x10000).  64-bit so a
+					   0xCxxxxxxx code stays positive. */
 
 	INTEGER64	kill_timer;
 	int		destroy_mode;
@@ -419,8 +433,27 @@ TS_STATE(ACT_FINISH)
 		if ( io.is_notNull() )
 			io->addRefio();
 #endif
-		RegisterWaitForSingleObject(&waitHandle,hProcess,on_exit_cb,
-			this,INFINITE,WT_EXECUTEONLYONCE);
+		if ( !RegisterWaitForSingleObject(&waitHandle,hProcess,on_exit_cb,
+				this,INFINITE,WT_EXECUTEONLYONCE) ) {
+		DWORD gle = GetLastError();
+			/* That wait is normally the ONLY thing that delivers this child's
+			   exit -- nothing of ours is registered with fwIO -- so if it is not
+			   armed, ACT_FINISH_RET yields and nobody ever comes back to wake it.
+			   The reactor then sleeps in its INFINITE wait still holding the
+			   keep-alive taken just above: a teardown that never ends.
+			   It fails when the OS threadpool cannot hand out a wait thread, i.e.
+			   under load -- exactly when a test run most needs the child's status.
+			   So degrade to polling the handle on a timer (which is what POSIX
+			   does for every child anyway) instead of hanging, and say so rather
+			   than carrying on quietly.  Inventing an exit status here is not an
+			   option: it would be the same lie this state machine was just fixed
+			   to stop telling. */
+			waitHandle = NULL;	/* not documented as untouched on failure */
+			poll_fallback = 1;
+			::fprintf(stderr,"ts2System: RegisterWaitForSingleObject failed"
+				" (GetLastError=%lu, child pid=%d) — polling the child"
+				" once a second instead\n",(unsigned long)gle,this->ret);
+		}
 		wait_pin = ifThis;	/* pin the object alive until FIN_UNREGISTER */
 	}
 	return rDO|ACT_FINISH_RET;
@@ -432,10 +465,31 @@ TS_STATE(ACT_FINISH_RET)
 	if ( hProcess && WaitForSingleObject(hProcess,0) == WAIT_OBJECT_0 ) {
 	DWORD code = 0;
 		GetExitCodeProcess(hProcess,&code);
-		status = (int)code;
+		/* Normalise to the POSIX wait status the parent is handed on POSIX,
+		   because that is what TSE_RETURN's payload means everywhere else.
+		   Windows gives a raw 32-bit exit code; POSIX gives (exit << 8)|signal,
+		   and handing the raw code to a WEXITSTATUS-style reader mislabels
+		   everything: an access violation, 0xC0000005 folded into an int, is
+		   -1073741819 and reads as "has not exited yet", while abort()'s exit
+		   code 3 reads as "killed by signal 3" -- a signal Windows has not got.
+		     code < 0x10000 : an exit code.  Truncated to 8 bits and shifted,
+		                      which is exactly what POSIX does with a wide one
+		                      (exit(1000) -> WEXITSTATUS == 232).  Truncating
+		                      rather than passing 0x100..0xffff through is what
+		                      keeps the two cases apart: such a value would sit
+		                      inside the range a POSIX status can occupy, so
+		                      exit code 259 would read back as "signal 3".
+		     otherwise      : a Windows exception/abort code (0x8xxxxxxx or
+		                      0xCxxxxxxx).  Passed through raw -- a POSIX wait
+		                      status is 16 bits, so >= 0x10000 cannot be one and
+		                      the reader can tell which of the two it holds. */
+		if ( code < 0x10000 )	status = (INTEGER64)(code & 0xff) << 8;
+		else			status = (INTEGER64)code;
 		return rDO|FIN_START;
 	}
 	/* not exited yet: wait for on_exit_cb → fwIO to re-run this state (main thread). */
+	if ( poll_fallback )		/* ... except that no callback is coming; re-arm */
+		stdInterval::wait(ifThis,1000*1000,TSE_TIMER);
 	return 0;
 }
 

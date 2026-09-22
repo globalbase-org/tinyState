@@ -12,8 +12,8 @@ class tinyState;
 #define delayedGC_MAX		1000
 
 
-sThreadMutex
-stdObject::refMtx[stdObject_REF_MUTEX_NUM];
+sImmortalArray<sThreadMutex,stdObject_REF_MUTEX_NUM>
+stdObject::refMtx;
 int8_t
 stdObject::refFlags[stdObject_REF_MUTEX_NUM];
 stdObject *
@@ -22,7 +22,7 @@ stdObject *
 stdObject::refEventHead[stdObject_REF_MUTEX_NUM];
 stdObject *
 stdObject::refEventTail[stdObject_REF_MUTEX_NUM];
-sThreadCond
+sImmortal<sThreadCond>
 stdObject::refCond;
 int8_t
 stdObject::start_flag;
@@ -108,7 +108,7 @@ int id;
 			/* broadcast であって signal ではない。待ち手が gc_thread と wait_stable()
 			 * の 2 者いるため、1 本しか起こさないと「仕事が残っているのに gc が
 			 * 寝たまま」という相互永眠になりうる。 */
-			refCond.broadcast();
+			refCond->broadcast();
 			return;
 		}
 	}
@@ -124,7 +124,7 @@ int id;
 			refFlags[nxt] |= mask;
 			id = nxt;
 			if ( id == 0 )
-				refCond.broadcast();	/* 上と同じ理由で broadcast */
+				refCond->broadcast();	/* 上と同じ理由で broadcast */
 		}
 	}
 }
@@ -167,7 +167,7 @@ stdObject::wait_stable()
 {
 doLOCK_ID(0);
 	for ( ; !( refList[0] == 0 && refFlags[0] == 0 && refEventHead[0] == 0 ) ; )
-		refCond.wait(refMtx[0]);
+		refCond->wait(refMtx[0]);
 }
 
 void
@@ -175,13 +175,13 @@ stdObject::finish()
 {
 doLOCK_ID(0)
 	finish_flag = 1;
-	refCond.broadcast();	/* idle で refCond.wait に寝ている gc_thread を起こす。
+	refCond->broadcast();	/* idle で refCond.wait に寝ている gc_thread を起こす。
 				 * これが無いと、GC work が尽きて gc_thread が先に寝た後で
 				 * finish() が flag を立てても誰も signal せず両者永眠（teardown
 				 * デッドロック）。work 残存時は投入側 signal で偶発的に起きるため
 				 * idle 終了時のみ出るレースだった。 */
 	for ( ; finish_flag == 1 ; )
-		refCond.wait(refMtx[0]);
+		refCond->wait(refMtx[0]);
 }
 
 
@@ -233,14 +233,14 @@ stdObject::gc_thread(void * arg)
 			 * 「仕事が増えた」通知しかなく、減って空になったことを告げる口が無かった。
 			 * これが無いと wait_stable() を起こす者が誰も居らず永眠する。 */
 			if ( refList[0] == 0 && refFlags[0] == 0 && refEventHead[0] == 0 )
-				refCond.broadcast();
+				refCond->broadcast();
 			for ( ; refList[0] == 0 && refFlags[0] == 0 ; ) {
 				if ( finish_flag ) {
 				  	finish_flag = 2;
-					refCond.signal();
+					refCond->signal();
 					return 0;
 				}
-				refCond.wait(refMtx[0]);
+				refCond->wait(refMtx[0]);
 			}
 		}
 		gc(0);

@@ -410,9 +410,20 @@ TS_STATE(ACT_READ) {
 TS_STATE(ACT_WAIT_EXIT) {
     if ( ev->type != TSE_RETURN ) return 0;         // 子 tinyState からの終了通知
     if ( ev->source != sys )      return 0;
+    INTEGER64 st = ev->msg_int;                     // POSIX の wait status 形式
+    if ( st >= 0x10000 )      ::printf("crashed: 0x%08lX\n",(unsigned long)st);
+    else if ( st & 0x7f )     ::printf("signal %d\n",(int)(st & 0x7f));
+    else                      ::printf("exit %d\n",(int)((st >> 8) & 0xff));
     return rDO | FIN_START;                         // 子プロセス終了
 }
 ```
+
+> **`TSE_RETURN` の `msg_int` は全プラットフォームで POSIX の wait status 形**(`exit << 8` と
+> `signal` の OR)。Windows(MinGW) も生の exit code ではなくこの形に正規化して載せるので、利用側に
+> OS 判定は要らない。ただし **`0x10000` 以上は Windows の例外コード**(`0xC0000005` = アクセス違反
+> 等)で、クラッシュはこの形で現れる。POSIX の wait status は 16bit に収まるので境目は一意。
+> `WEXITSTATUS` / `WIFSIGNALED` は MinGW に無いので、移植するなら上のように手で展開する。
+> 詳細は `ts2System` の doxygen (`ts2system_status`)。
 
 > **コマンド文字列の先頭文字が起動方式を選ぶ**。`#` 始まり(`#cmd arg1 arg2`)なら `sh` を挟まず
 > 直接起動で、`ret` が実プロセスの PID になる。`#` 無しなら `sh -c` 経由でシェル展開・パイプが
@@ -1413,6 +1424,97 @@ public:
 ```
 
 > これは tinyState フレームワーク側のバグではなく <b>利用側コードのハマりポイント</b>。グローバル <code>sPtr</code> は「終了時クラッシュ」として顕在化しやすい。
+
+---
+
+## 13.5. 自分の関数の中で自分が死ぬ (TS_SELF_GUARD / STD_SELF_GUARD)
+
+`sPtr::operator->` は **addref しない**。つまり `p->f()` の `f()` の中で `p` がクリアされると、
+まだ `f()` の途中なのにレシーバが消える。
+
+<pre>
+sPtr&lt;hwAgent&gt;  waiters[N];
+...
+waiters[i]-&gt;destroy();        // ← destroy() の中で waiters[i] = thNULL が走ると
+                              //    戻ってくる前に自分が gc される
+</pre>
+
+参照数が 0 に落ちた瞬間にオブジェクトは `stdObject::refEventHead` → gc スレッド行きになり、
+`refEvent()` の後に **gc スレッドがデストラクタを呼ぶ**。呼び出し側スレッドが関数から抜け切る
+方が確率的には速いので、**たいていは動いてしまう**。負荷やスケジューリング次第で稀に壊れる。
+
+### まず構造で消せないかを見る
+
+このハマりが起きる条件は 2 つそろったときだけ:
+
+1. その関数の中で、自分を指す最後の参照が落ち得る (外部コードを呼ぶ / 自分の逆参照を切る)
+2. **その後で `this` を触る**
+
+多くの場合 2 を無くせる。**外部呼び出しを関数の末尾へ寄せ、それ以降 `this` を触らない**形に
+直せばピンは要らない。「触る」には `sThreadMutexHandle` のデストラクタによる unlock が
+含まれることに注意 — ソース上に現れないので見落としやすい。
+
+<pre>
+/* 悪い: lm を保持したまま外を呼び、戻ってから __hdr が this-&gt;lm を unlock する */
+void myClass_::f()
+{
+sThreadMutexHandle __hdr(lm);
+	list-&gt;del(x);
+	other-&gt;callback(x);          /* ← ここで自分の最後の参照が落ちると */
+}                                    /* ← この unlock が解放済み mutex を叩く */
+
+/* 良い: lm の中ではリストだけ触り、外部呼び出しは lm を放した後の末尾に置く */
+void myClass_::f()
+{
+sPtr&lt;other&gt;  o;
+	{
+	sThreadMutexHandle __hdr(lm);
+		list-&gt;del(x);
+		o = other;
+	}
+	if ( o.is_notNull() )
+		o-&gt;callback(x);      /* 以降 this を触らない */
+}
+</pre>
+
+同じ理屈で、自分の逆参照を切る関数は **`this` への書き込みを外部呼び出しの前に済ませ、
+参照はローカルへ移しておく**。ローカルはスタック上なので、誰が死んでも関数の終わりまで生きる。
+
+### 構造で消せないときだけピンを置く
+
+どうしても外部呼び出しの後に `this` を触る必要がある関数 (例: `tinyState_::destroy()` は
+`eventHandler()` の後に `THR_KILL(SIGPIPE)` を出すこと自体が目的) では、
+**関数の一番先頭**にガードマクロを置く。
+
+<pre>
+void myClass_::destroy(int delayFlag)
+{
+TS_SELF_GUARD;                  /* ← 先頭。他のどのローカルよりも前 */
+	{
+	sThreadMutexHandle __hdr(lm);
+		...
+	}
+	this-&gt;eventHandler(ev);  /* この中で自分の最後の参照が落ちても */
+	THR_KILL(SIGPIPE);       /* ここまで生きている */
+}
+</pre>
+
+| マクロ | 定義場所 | 取るもの |
+|---|---|---|
+| `TS_SELF_GUARD` | `ts2/c++/tinyState.h` | `ifThis` (interface) |
+| `STD_SELF_GUARD` | `ts2/c++/stdObject.h` | `this` (stdObject 一般) |
+
+**守るべき 2 点:**
+
+1. **必ず関数の先頭に置く。** ローカルは宣言の逆順に壊れるので、`sThreadMutexHandle` より
+   後ろに置くとピンが先に落ち、unlock が解放済みメモリを叩く — 直そうとしたバグが残る。
+2. **tinyState 派生では `TS_SELF_GUARD` (= `ifThis`) を使う。** ts2 は interface と impl が
+   別オブジェクトで、`tinyState_` のメンバ関数の `this` は impl 側。interface は impl を
+   強参照するが逆は `sWptr` なので、`STD_SELF_GUARD` (= `sPtr(this)`) では **interface の死を
+   止められない**。`ifThis` を取れば interface 経由で impl も止まる。
+
+> ピンは万能ではなく、コストも 0 ではない (`refMtx` の lock/unlock が 2 回入る)。
+> 全インスタンス関数に配るものではなく、上の条件 1・2 が両方立つ関数にだけ置く。
 
 ---
 

@@ -18,10 +18,16 @@
  * @tparam __TYPE スレッドローカルに保持する型。/ Per-thread type.
  */
 template<class __TYPE>
-class sThreadKey : public sObject {
+/* ★ **sObject を継承しない・デストラクタを宣言しない。**
+ * どちらも暗黙のデストラクタを非 trivial にし、静的オブジェクトとして置いた瞬間に
+ * __cxa_atexit (MinGW では atexit) へ登録されてしまう。sCallSection::key は静的なので、
+ * それだと DLL detach 中に破棄され、tinyState が「静的デストラクタを 1 つも登録しない」
+ * という不変条件 (sImmortal.h・ctest の tinyState_no_static_dtor) を破る。
+ * この型は状態を持たない (実体は operator-> の中の thread_local) ので、
+ * sObject の機能 (custom operator new / panic) は要らない。 */
+class sThreadKey {
 public:
 	sThreadKey() {}
-	~sThreadKey() {}
 
 	/* Per-thread instance via C++11 thread_local (native TLS) instead of
 	   pthread_key_create/getspecific/setspecific.  On Windows, winpthreads'

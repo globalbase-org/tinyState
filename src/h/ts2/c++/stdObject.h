@@ -7,12 +7,33 @@
 #include	"ts2/c++/ts_types.h"
 #include	"ts2/c++/sObject.h"
 #include	"ts2/c++/sThreadMutex.h"
+#include	"ts2/c++/sThreadCond.h"
+#include	"ts2/c++/sImmortal.h"
 
 
 #define stdObject_REF_MUTEX_NUM		101
 
 #define REF__NOTICE	std::function<void()>
 #define REF_NOTICE	int
+
+/** @brief 実行中の自分を関数から抜けるまで生かしておくピン (stdObject 一般)。
+ *  / Pin `this` alive for the duration of the member function (any stdObject).
+ *  @details
+ *  自分のインスタンス関数の中で自分の参照カウントが 0 に落ちると、gc スレッドが関数から
+ *  抜けるより先にデストラクタを呼べてしまう。`sPtr::operator->` は addref しないので、
+ *  `p->f()` の `f()` の中で `p` がクリアされればレシーバごと消える。
+ *
+ *  **関数の一番先頭** — どのローカルよりも前 — に置くこと。ローカルは宣言の逆順に壊れる
+ *  ので、後ろに置くとピンが先に落ち、mutex の unlock が解放済みメモリを叩く。
+ *
+ *  interface / impl に分かれる tinyState 派生では、これではなく `TS_SELF_GUARD`
+ *  (interface を取る) を使うこと。詳細は COOKBOOK.md §13.5。
+ *
+ *  / Keeps `this` alive until the member function returns.  Must be the FIRST declaration
+ *  in the function.  For `tinyState` subclasses use `TS_SELF_GUARD` instead — it pins the
+ *  interface object, which is the one that actually dies.
+ */
+#define STD_SELF_GUARD	sPtr<stdObject> __std_self_guard(this)
 
 
 /**
@@ -69,12 +90,14 @@ private:
 	static int8_t	finish_flag;
 	static int8_t	start_flag;
 
-	static sThreadMutex	refMtx[stdObject_REF_MUTEX_NUM];
+	/* ★ refMtx / refCond は不滅 (デストラクタを登録しない)。理由は sImmortal.h。
+	 * 静的デストラクタから relref() が来るため、これらが先に壊れると 0 番地へ飛ぶ。 */
+	static sImmortalArray<sThreadMutex,stdObject_REF_MUTEX_NUM>	refMtx;
 	static int8_t		refFlags[stdObject_REF_MUTEX_NUM];
 	static stdObject *	refList[stdObject_REF_MUTEX_NUM];
 	static stdObject *	refEventHead[stdObject_REF_MUTEX_NUM];
 	static stdObject *	refEventTail[stdObject_REF_MUTEX_NUM];
-	static sThreadCond	refCond;
+	static sImmortal<sThreadCond>	refCond;
 };
 
 

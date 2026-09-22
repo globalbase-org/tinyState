@@ -19,6 +19,40 @@ class sThreadMutexRecursive;
  * FORCEINLINE (__forceinline) を定義し衝突・再定義警告になるため、専用名を使う。 */
 #define TS_FORCEINLINE __attribute__((always_inline))
 
+/** @brief 実行中の自分を関数から抜けるまで生かしておくピン。/ Pin `this` alive for the
+ *  duration of the member function.
+ *  @details
+ *  自分のインスタンス関数の中で自分の参照カウントが 0 に落ちると、gc スレッドが関数から
+ *  抜けるより先にデストラクタを呼べてしまう。`sPtr::operator->` は addref しないので、
+ *  `p->f()` の `f()` の中で `p` がクリアされればレシーバごと消える。
+ *
+ *  **関数の一番先頭** — `sThreadMutexHandle` などどのローカルよりも前 — に置くこと。
+ *  ローカルは宣言の逆順に壊れるので、後ろに置くとピンが先に落ち、mutex の unlock が
+ *  解放済みメモリを叩く。
+ *
+ *  tinyState_ の実装関数では **必ず interface (`ifThis`) を取る**。`this` は impl 側で、
+ *  interface は impl を強参照するが逆は `sWptr` なので、`sPtr(this)` では interface の
+ *  死を止められない。stdObject 一般には [[STD_SELF_GUARD]] を使う。
+ *
+ *  まず「外部呼び出しを関数の末尾へ寄せ、以後 `this` を触らない」構造で消せないかを
+ *  検討し、構造で消せないものだけこれで受ける。詳細は COOKBOOK.md §13.5。
+ *
+ *  / Keeps `this` alive until the member function returns, so the GC thread cannot run the
+ *  destructor while a thread is still inside the object.  Must be the FIRST declaration in
+ *  the function (locals are destroyed in reverse order).  In `tinyState_` methods always
+ *  pin the interface (`ifThis`), never `this`.
+ *
+ *  @code
+ *  void myClass_::someMethod()
+ *  {
+ *  TS_SELF_GUARD;                 // ← 先頭。他のローカルより前
+ *  sThreadMutexHandle __hdr(lm);
+ *      ...
+ *  }
+ *  @endcode
+ */
+#define TS_SELF_GUARD	sPtr<tinyState> __ts_self_guard(ifThis)
+
 typedef INTPTR TS_STATE_TYPE;
 typedef int (*TS_HANDLER_FUNC)(sPtr<tinyState> ,sPtr<stdEvent> );
 typedef sPtr<stdEvent> (*TS_FILTER_FUNC)(sPtr<tinyState> ,sPtr<stdEvent> );

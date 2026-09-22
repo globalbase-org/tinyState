@@ -3,11 +3,11 @@
 #include	"ts2/c++/stdBalancedTree.h"
 
 
-sBalancedTreeCondition
-sBalancedTreeCondition::plusInfty = sBalancedTreeCondition(1);
+sImmortal<sBalancedTreeCondition>
+sBalancedTreeCondition::plusInfty(1);
 
-sBalancedTreeCondition
-sBalancedTreeCondition::minusInfty = sBalancedTreeCondition(-1);
+sImmortal<sBalancedTreeCondition>
+sBalancedTreeCondition::minusInfty(-1);
 
 
 sBalancedTreeCondition::sBalancedTreeCondition()
@@ -193,11 +193,11 @@ int r;
 	int l = levelLarge();
 		if ( s < l ) {
 			obj = large->del(
-				thNEW( stdBalancedTreeObject_,(sBalancedTreeCondition::minusInfty,thNULL)),&large);
+				thNEW( stdBalancedTreeObject_,(*sBalancedTreeCondition::minusInfty,thNULL)),&large);
 		}
 		else if ( s ) {
 			obj = small->del(
-				thNEW( stdBalancedTreeObject_,(sBalancedTreeCondition::plusInfty,thNULL)),&small);
+				thNEW( stdBalancedTreeObject_,(*sBalancedTreeCondition::plusInfty,thNULL)),&small);
 		}
 		else {
 			*posThis = thNULL;

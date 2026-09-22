@@ -1125,6 +1125,14 @@ sub scan_file
 
     # Compute constructor arg names for TS_DEFARGS expansion
     my %argsName = ();
+    # ★ 出力順は **コンストラクタ引数の順** に固定する。
+    # keys %hash の順は Perl 5.18 以降プロセスごとにランダム化されるので、
+    # ここを keys で舐めると **同じソースを建て直すたびにメンバの並びが変わる**。
+    # 並びが変わればオフセットが変わる = 生成ヘッダと ABI が毎回変わる。
+    # 実害: 静的ビルドと共有ビルドを別々に建てて両方 install すると、
+    # ヘッダは一方・ライブラリは他方のレイアウトになり、sizeof が食い違う。
+    # (実測: 生成ヘッダ 26 本中 10 本が静的/共有で不一致)
+    my @argsOrder = ();
     foreach my $ff (@{$functions->{functions}}) {
 	my $fn = $ff->{fname};
 	if ( $ff->{type} eq "" ) { $fn =~ s/_$//; }
@@ -1136,6 +1144,7 @@ sub scan_file
 	    $str =~ m/.*?([A-Za-z0-9_]+)$/;
 	    my $v = $1;
 	    next if $v eq "parent";
+	    push(@argsOrder,$v) unless exists $argsName{$v};
 	    $argsName{$v} = $str;
 	}
     }
@@ -1145,7 +1154,7 @@ sub scan_file
 	my @new_impl = ();
 	foreach my $elem (@implement_include) {
 	    if ( elem_text($elem) =~ m/^\s*TS_DEFARGS\s*$/ ) {
-		foreach my $v (keys %argsName) {
+		foreach my $v (@argsOrder) {
 		    push(@new_impl, "\t".$argsName{$v}.";");  # 自動生成行、行番号なし
 		}
 	    } else {

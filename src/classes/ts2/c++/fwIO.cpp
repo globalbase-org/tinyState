@@ -54,6 +54,20 @@ fwIO::dump(const char * msg)
 		::printf("   ** INTERVAL **\n");
 		interval_objs->check(thNULL,_ts_io_dump);
 	}
+	/* The three sections above can all be empty while loop() still refuses to
+	   return, because refio is the fourth term of its exit condition.  Print it,
+	   or a reader of this dump concludes "nothing left to wait on" and starts
+	   looking in the wrong place.
+	   Both numbers, not just the count: addRefio(obj) is what records a pin, and
+	   obj is optional -- tsThread's pool and (on Windows) ts2System's child wait
+	   both take the refcount anonymously.  refio > pins is therefore not a leak,
+	   it is that many anonymous holders, and the difference is the only thing
+	   that distinguishes them from a named one.
+	   The queue is not walked: dump() runs without mu (see the handle above),
+	   so reading two scalars is safe where traversing a live queue would not be. */
+	if ( stdFrameWork::trace_bit & FWTR_RWI )
+		::printf("   ** REFIO ** refio=%d pins=%d\n",
+			refio,refio_pins.is_notNull() ? refio_pins->count : 0);
 	if ( stdFrameWork::trace_bit & FWTR_RWI )
 		::printf("%s END\n",msg);
 }
@@ -191,6 +205,26 @@ sThreadMutexHandle __hdr(mu);
 	refio --;
 	if ( obj.is_notNull() )				/* drop one pin for this issuer */
 		refio_pins->del([obj](sPtr<tinyState> x){ return x == obj ? 1 : 0; });
+	if ( refio < 0 ) {
+		/* More releases than takes.  loop()'s exit condition tests refio == 0, so
+		   a negative count can never satisfy it and the reactor would never
+		   return -- clamp it.  The unbalance is a caller bug either way, so the
+		   clamp does not happen quietly. */
+		::printf("fwIO: refio went negative (%d) — more delRefio() than"
+			" addRefio(); clamping to 0\n",refio);
+		refio = 0;
+	}
+	if ( refio == 0 && refio_pins->count != 0 )
+		/* A pin outliving the last refio is an unbalanced addRefio(obj) /
+		   anonymous delRefio() pair: nobody will drop that sPtr, so its issuer
+		   never dies.  Reported, NOT dropped.  The pin is the only thing keeping
+		   a threadpool op -- whose context holds a raw `this` -- from running
+		   against freed memory; that is the intermittent SEGV it was added to
+		   kill.  fwIO cannot see whether the op is still in flight, and guessing
+		   wrong trades a leak that says so for a use-after-free that does not. */
+		::printf("fwIO: refio reached 0 with %d pin(s) still held — an"
+			" addRefio(obj) was released by an anonymous delRefio();"
+			" the issuer will not be freed\n",refio_pins->count);
 	writePipe();
 }
 

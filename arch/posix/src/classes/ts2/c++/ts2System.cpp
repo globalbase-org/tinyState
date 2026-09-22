@@ -24,7 +24,8 @@ TS_BEGIN_IMPLEMENT
  * @details
  * コンストラクタで `fork`/`exec` してプロセスを起動し、終了を検出したら
  * 親に `TSE_RETURN` を送る。`ev->msg_int` に `waitpid` の生 `status` が入る
- * (`WEXITSTATUS` / `WIFSIGNALED` 等で評価すること)。
+ * (`WEXITSTATUS` / `WIFSIGNALED` 等で評価すること)。Windows(MinGW) も同じ形に正規化して
+ * 載せるので利用側に OS 判定は要らない。詳細は @ref ts2system_status。
  *
  * **commandLine の形式 / commandLine format:**
  * | プレフィックス | 起動方法 |
@@ -67,6 +68,8 @@ TS_BEGIN_IMPLEMENT
  *
  * コンストラクタで `fork`/`exec` してプロセスを起動。終了時に親へ `TSE_RETURN` を送る。
  * `ev->msg_int` は `waitpid` の生 `status`。`WEXITSTATUS(ev->msg_int)` で終了コードを得る。
+ *
+ * @see ts2system_status — 終了 status の形 (Windows(MinGW) を含む) / exit status shape
  */
 class TS_THISCLASS : public TS_BASECLASS {
 public:

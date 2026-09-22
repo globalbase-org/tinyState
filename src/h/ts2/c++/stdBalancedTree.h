@@ -14,8 +14,8 @@ public:
 	virtual int cmp(sBalancedTreeCondition & d);
 	int is_infty();
 
-	static sBalancedTreeCondition plusInfty;
-	static sBalancedTreeCondition minusInfty;
+	static sImmortal<sBalancedTreeCondition> plusInfty;
+	static sImmortal<sBalancedTreeCondition> minusInfty;
 protected:
 	unsigned	plusInf:1;
 	unsigned	minusInf:1;
@@ -169,7 +169,7 @@ public:
 	sPtr<stdBalancedTreeStdQueueCallback<__TYPE1> > cb;
 		cb = thNEW( stdBalancedTreeStdQueueCallback<__TYPE1>,());
 		cb->q = thNEW( stdQueue<__TYPE1>,());
-		stdBalancedTree_::walk(sBalancedTreeCondition::minusInfty,cb);
+		stdBalancedTree_::walk(*sBalancedTreeCondition::minusInfty,cb);
 		return cb->q;
 	}
 protected:
@@ -232,7 +232,7 @@ public:
 	sPtr<stdBalancedTreeStdQueueCallback<__TYPE1> > cb;
 		cb = thNEW( stdBalancedTreeStdQueueCallback<__TYPE1>,());
 		cb->q = thNEW( stdQueue<__TYPE1>,());
-		stdBalancedTree_::walk(sBalancedTreeCondition::minusInfty,cb);
+		stdBalancedTree_::walk(*sBalancedTreeCondition::minusInfty,cb);
 		return cb->q;
 	}
 protected:

@@ -19,7 +19,14 @@
  *
  * SIGPIPE is intentionally NOT handled: on Windows it does not exist, and its
  * POSIX roles (THR_KILL interrupt + broken-pipe suppression) both vanish (Windows-port design memo
- * §4/5).  FIRST CUT (2026-07-12): compiles; run verification pending on the box.
+ * §4/5).
+ *
+ * VERIFIED ON THE BOX: teardown and the fwIO delivery path (2026-07-13), and
+ * the event entry itself (2026-09-15).  Both rounds turned up faults that only a
+ * run can show — a static-destructor crash and an IOCP key collision in the
+ * first; in the second, Ctrl+C never arriving at all while Ctrl+Break did, and
+ * an in-process raise(SIGINT) killing the process outright.  Measurements and
+ * the before/after table are in tsSignalCore.md.
  */
 
 /* WIN32_LEAN_AND_MEAN before <windows.h> keeps legacy <winsock.h> out, so
@@ -37,6 +44,8 @@ CLASS_TINYSTATE(tsSignalCore,tinyState)
 
 #if 0
 TS_BEGIN_IMPLEMENT
+
+#include	"ts2/c++/sImmortal.h"
 
 class TS_THISCLASS : public TS_BASECLASS {
 public:
@@ -66,8 +75,14 @@ private:
 	sPtr<stdQueue<tsSignal> > 	front_list;
 
 	static BOOL WINAPI	console_handler(DWORD ctrlType);
+	static void __cdecl	crt_signal_handler(int sig);
+	/** @brief wake the tsSignalCore registered for @a sig; TRUE if one was found. */
+	static BOOL		deliver(int sig);
 	static tsSignalCore * 	signal_list;
-	static sPtr<tsSignalCore> _signal_list;
+	/* ★ 不滅 (デストラクタを登録しない)。このデストラクタこそが relref() を呼び、
+	 * 破棄済みの stdObject::refMtx[] を叩いて 0 番地へ飛んでいた経路そのもの。
+	 * abort() では FIN が走らないので、FIN 側の切り離しでは塞げない。sImmortal.h 参照。 */
+	static sImmortal<sPtr<tsSignalCore> > _signal_list;
 	void			ins_signal();
 	void			del_signal();
 };
@@ -100,7 +115,7 @@ static volatile LONG	g_console_handler_installed = 0;
 
 tsSignalCore *
 tsSignalCore_::signal_list;
-sPtr<tsSignalCore>
+sImmortal<sPtr<tsSignalCore> >
 tsSignalCore_::_signal_list;
 
 tsSignalCore *
@@ -118,8 +133,8 @@ tsSignalCore_::ins_signal()
 {
 	this->next = tsSignalCore_::signal_list;
 	tsSignalCore_::signal_list = ifThis.__get();
-	this->_next = tsSignalCore_::_signal_list;
-	tsSignalCore_::_signal_list = ifThis;
+	this->_next = *tsSignalCore_::_signal_list;
+	*tsSignalCore_::_signal_list = ifThis;
 }
 
 void
@@ -143,7 +158,7 @@ tsSignalCore ** ip;
 	   sPtr ref here lets our parent (application) free us at normal teardown,
 	   while the refcount-lock statics are still alive.  Windows-port design memo */
 sPtr<tsSignalCore> * sp;
-	for ( sp = &tsSignalCore_::_signal_list ;
+	for ( sp = &(*tsSignalCore_::_signal_list) ;
 			sp->is_notNull() && (*sp).__get() != ifThis.__get() ;
 			sp = &(*sp)->_next );
 	if ( sp->is_notNull() ) {
@@ -173,15 +188,36 @@ int sig;
 	default:
 		return FALSE;
 	}
-	{
-	tsSignalCore * c = search_signal(sig);
-		if ( c && c->port ) {
-			c->sig_count ++;
-			PostQueuedCompletionStatus((HANDLE)c->port, 0, (ULONG_PTR)c->key, NULL);
-			return TRUE;
-		}
+	return deliver(sig);
+}
+
+
+/* Wake the tsSignalCore registered for this signal number by posting a
+   completion to its fwIO IOCP port -- the Windows stand-in for the POSIX
+   self-pipe write.  Shared by the console handler and the CRT signal entry. */
+BOOL
+tsSignalCore_::deliver(int sig)
+{
+tsSignalCore * c = search_signal(sig);
+	if ( c && c->port ) {
+		c->sig_count ++;
+		PostQueuedCompletionStatus((HANDLE)c->port, 0, (ULONG_PTR)c->key, NULL);
+		return TRUE;
 	}
 	return FALSE;
+}
+
+
+/* CRT signal entry.  A console Ctrl+C arrives through console_handler, but an
+   in-process raise(SIGINT) does not -- without this it takes the CRT default
+   and kills the process outright, skipping the graceful path entirely.  Windows
+   runs this on the raising thread (not an async-signal context), so posting to
+   the IOCP port here is as safe as it is from console_handler. */
+void __cdecl
+tsSignalCore_::crt_signal_handler(int sig)
+{
+	::signal(sig, crt_signal_handler);	/* SysV semantics: re-arm before returning */
+	deliver(sig);
 }
 
 void
@@ -219,9 +255,28 @@ TS_STATE(INI_START)
 
 	this->ins_signal();
 
-	/* register the console handler once for the whole process */
-	if ( InterlockedCompareExchange(&g_console_handler_installed,1,0) == 0 )
+	/* Register the console handler once for the whole process.
+	   SetConsoleCtrlHandler(NULL,TRUE) installs a "Ctrl+C is ignored" state,
+	   and that state is INHERITED -- by a child started in a new process group
+	   (which begins with it set), and by a child of a parent that set it.  While
+	   it holds, the event is swallowed before any handler sees it: our handler
+	   registers, GenerateConsoleCtrlEvent reports success, and nothing arrives.
+	   Clearing it first is what makes Ctrl+C reach console_handler at all.
+	   CTRL_BREAK_EVENT is exempt from the ignore state, which is why Ctrl+Break
+	   kept working while Ctrl+C did not.
+
+	   This does override a parent that deliberately silenced Ctrl+C.  It is done
+	   unconditionally because INI only runs once the caller has constructed a
+	   tsSignal and asked to be told about the signal -- having asked, being
+	   unreachable is the more surprising outcome. */
+	if ( InterlockedCompareExchange(&g_console_handler_installed,1,0) == 0 ) {
+		SetConsoleCtrlHandler(NULL, FALSE);
 		SetConsoleCtrlHandler(console_handler, TRUE);
+	}
+
+	/* CRT entry for this signal number, so an in-process raise() lands on the
+	   same graceful path a console event does. */
+	::signal(this->sig, crt_signal_handler);
 
 	return rDO|ACT_START;
 }

@@ -3,7 +3,7 @@
 #include	"ts2/c++/sEndian.h"
 
 
-sEndian
+sImmortal<sEndian>
 sEndian::cpu;
 
 void

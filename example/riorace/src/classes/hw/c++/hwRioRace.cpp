@@ -15,7 +15,7 @@
  *
  * Widen the window with the instrumented library build (TS2_RIO_RACE_SLEEP_MS): it sleeps in
  * the completion callback between "decide to re-arm" and the SetThreadpoolWait, which is
- * exactly the preemption the ticket describes.
+ * exactly the preemption this harness exists to catch.
  *
  * Buffers and the recvfrom source address are MEMBERS (they must survive the yield across
  * the op), and every datagram op is its own ev-independent state (CLAUDE.md 鉄則 5).

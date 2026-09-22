@@ -92,7 +92,11 @@ TS_STATE(ACT_WAIT_READY)
 	if ( server->err != 0 ) {
 		::printf("[socktest] server setup failed at %s err=%d\n",
 			server->errpos,server->err);
-		return rDO|FIN_START;
+		/* ACT_CLEANUP を経由すること。FIN_START へ直行すると sig_pipe / sig_test /
+		   server が destroy されず、reactor が drain できずプロセスが出られない
+		   (ACT_CLEANUP のコメント参照)。bind が ephemeral port 範囲の他プロセスと
+		   衝突しただけで 60 秒ハングして「稀に落ちるテスト」に見えていた。 */
+		return rDO|ACT_CLEANUP;
 	}
 	if ( mode == 0 || mode == 4 )
 		conn = thNEW(ts2IOsockTCPconnect,(ifThis,&resolve,"127.0.0.1",port));

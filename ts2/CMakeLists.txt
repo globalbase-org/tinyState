@@ -47,6 +47,7 @@ set(TS2_SOURCES
   classes/ts2/c++/sCallSection.cpp
   classes/ts2/c++/co_tsThreadKill.cpp
   classes/ts2/c++/tsCallList.cpp
+  classes/ts2/c++/tsProbe.cpp
   )
 
 set(TS2_ARCH_SOURCES

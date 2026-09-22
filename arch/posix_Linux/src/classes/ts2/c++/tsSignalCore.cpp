@@ -12,6 +12,8 @@ CLASS_TINYSTATE(tsSignalCore,tinyState)
 #if 0
 TS_BEGIN_IMPLEMENT
 
+#include	"ts2/c++/sImmortal.h"
+
 #include	"ts2/c++/sTimer.h"
 
 class TS_THISCLASS : public TS_BASECLASS {
@@ -36,6 +38,15 @@ public:
 private:
 	int			pipe_read;
 
+	/* ACT_PREV でハンドラを載せる直前の disposition。FIN_START はこれを書き戻す。
+	   以前は無条件に SIG_DFL を書いており、アプリが自分で張っていたハンドラを
+	   tsSignal 1 本の生成→破棄で踏み潰していた。tsApplication が起動時に張る
+	   SIGPIPE の no-op ハンドラがその犠牲になり、tsSignal(SIGPIPE) を
+	   畳んだ後の destroy() が出す THR_KILL(SIGPIPE) が SIG_DFL に当たって
+	   プロセスを殺していた (rc=141)。 */
+	struct sigaction	prev_act;
+	int			prev_act_valid;
+
 	sPtr<fwIO> 			io;
 
 	static void		signal_handler_active(int sig);
@@ -44,7 +55,10 @@ private:
 	sPtr<stdQueue<tsSignal> > 	front_list;
 
 	static tsSignalCore * 	signal_list;
-	static sPtr<tsSignalCore> _signal_list;
+	/* ★ 不滅 (デストラクタを登録しない)。このデストラクタこそが relref() を呼び、
+	 * 破棄済みの stdObject::refMtx[] を叩いて 0 番地へ飛んでいた経路そのもの。
+	 * abort() では FIN が走らないので、FIN 側の切り離しでは塞げない。sImmortal.h 参照。 */
+	static sImmortal<sPtr<tsSignalCore> > _signal_list;
 	void			ins_signal();
 	void			del_signal();
 };
@@ -63,6 +77,7 @@ tsSignalCore_::tsSignalCore_(
 	tinyState_(parent->application)
 {
 	this->sig = sig;
+	this->prev_act_valid = 0;
 }
 
 void
@@ -79,7 +94,7 @@ tsSignalCore_::inherit(
 
 tsSignalCore *
 tsSignalCore_::signal_list;
-sPtr<tsSignalCore>
+sImmortal<sPtr<tsSignalCore> >
 tsSignalCore_::_signal_list;
 
 tsSignalCore *
@@ -99,8 +114,8 @@ tsSignalCore_::ins_signal()
 {
 	this->next = tsSignalCore_::signal_list;
 	tsSignalCore_::signal_list = ifThis.__get();
-	this->_next = tsSignalCore_::_signal_list;
-	tsSignalCore_::_signal_list = ifThis;
+	this->_next = *tsSignalCore_::_signal_list;
+	*tsSignalCore_::_signal_list = ifThis;
 }
 
 void
@@ -192,7 +207,10 @@ struct sigaction act;
 	act.sa_flags = 0;
 	act.sa_handler = signal_handler_active;
 	sigemptyset(&act.sa_mask);
-	::sigaction(sig,&act,0);
+	/* 旧 disposition を控える。FIN_SLEEP -> ACT_PREV の再活性化でもここを通るので、
+	   そのたびに取り直す (直前に FIN_START が書き戻した値を拾うだけで整合する)。 */
+	::sigaction(sig,&act,&this->prev_act);
+	this->prev_act_valid = 1;
 //	::signal(sig,signal_handler_active);
 	return rDO|ACT_START;
 }
@@ -238,10 +256,32 @@ TS_STATE(FIN_START)
 struct sigaction act;
 	signal(sig,signal_handler_empty);
 
-	memset(&act,0,sizeof(act));
-	act.sa_flags = SA_NOCLDWAIT;
-	act.sa_handler = SIG_DFL;
-	sigaction(sig,&act,0);
+	/* Restore the default disposition -- and nothing more.  This used to add
+	   SA_NOCLDWAIT, which only means anything for SIGCHLD: it tells the kernel
+	   to reap children itself rather than leave them as zombies.  Between the
+	   last tsSignal(SIGCHLD) going away and the next one being built, that flag
+	   stayed armed, so a child that exited in the gap was collected before
+	   ts2System's waitpid could look at it.  waitpid then returned ECHILD and
+	   the status it never read defaulted to 0, i.e. a failed child reported
+	   success.  Short-lived children hit that gap nearly every time.
+
+	   A generic signal core has no business setting a SIGCHLD-specific policy,
+	   and whoever spawns a child it will never wait for is the one who knows
+	   the child needs reaping.  Cygwin has run without the flag all along
+	   (its signal.h has no SA_NOCLDWAIT, so the local #define made it a no-op)
+	   and shows none of this. */
+	if ( this->prev_act_valid ) {
+		/* ACT_PREV で控えた disposition へ戻す。SIG_DFL 固定にすると、アプリが
+		   起動時に張ったハンドラ (tsApplication の SIGPIPE no-op 対策)
+		   まで剥がれ、以降の destroy() の THR_KILL(SIGPIPE) がプロセスを殺す。 */
+		sigaction(sig,&this->prev_act,0);
+	}
+	else {
+		memset(&act,0,sizeof(act));
+		act.sa_flags = 0;
+		act.sa_handler = SIG_DFL;
+		sigaction(sig,&act,0);
+	}
 	return rDO|FIN_SLEEP;
 }
 TS_STATE(FIN_SLEEP)

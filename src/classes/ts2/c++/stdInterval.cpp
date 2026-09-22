@@ -6,7 +6,7 @@
 #include	"ts2/c++/stdInterval.h"
 #include	"ts2/c++/sThreadMutexHandle.h"
 
-sThreadMutex
+sImmortal<sThreadMutex>
 stdInterval::m;
 INTEGER64
 stdInterval::lastAccessTime;
@@ -37,7 +37,7 @@ INTEGER64 ret;
 	gettimeofday(&tm,0);
 	ret = ((INTEGER64)tm.tv_usec) + ((INTEGER64)tm.tv_sec)*1000000;
 	{
-	sThreadMutexHandle __hdr(m);
+	sThreadMutexHandle __hdr(*m);
 		if ( lastAccessTime < ret ) {
 			lastAccessTime = ret;
 			return ret;

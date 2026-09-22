@@ -240,11 +240,45 @@ FWTR_RWI : FWTR_READ|FWTR|WRITE|FWTR_INTERVAL
 FWTR_ALL : FWTR_READ|FWTR|WRITE|FWTR_INTERVAL|FWTR_ACTIVE
 
 
-### 5.2 その他の切り分け
+### 5.2 fd 台帳（`sObject::report_descriptor()`）と `FD_SETSIZE`
+
+`sObject::report_descriptor()` は、開いたまま閉じていない fd を「どこで open したか」
+（`__FILE__:__LINE__`）とともに一覧する。台帳の実体は `sObject.cpp` 内の
+
+```c
+static CODE_POS * descriptor_list[FD_SETSIZE];
+```
+
+で、`static` なので外からは触れない。参照は `report_descriptor()` を通すこと。
+
+**★ 台帳の上限は常に `FD_SETSIZE` で、この値はプラットフォームごとに違う。**
+
+| | `FD_SETSIZE` |
+|---|---|
+| Linux (glibc) | 1024 |
+| macOS | 1024 |
+| Cygwin | 1024 |
+| **MinGW** | **64** |
+
+（実測値。tinyState は `FD_SETSIZE` を自前定義しないので、コンパイル環境の値がそのまま効く。
+MinGW では `winsock2.h` の既定 64。）
+
+**Windows では台帳はほぼ空になる。** winsock の `SOCKET` や `HANDLE` は CRT fd ではなく、
+値が `FD_SETSIZE` を軽く超えるため、`set_open_hash()` は範囲外の記述子を**意図的に記録しない**
+（記録しようとすると配列外書き込みになる）。ソケット・IOCP・子プロセスのパイプはいずれも
+載らない。POSIX では全 fd が `FD_SETSIZE` 未満なのでこの分岐は踏まない。
+
+> ⚠ **`0..1023` を決め打ちで舐めてはいけない。** MinGW では 64 要素しかないので配列外を読む。
+> しかも隣接領域には同じ `CODE_POS` 構造体が並んでいるため、**もっともらしい
+> `__FILE__:__LINE__` が何十行も出てくる**。出力が壊れて見えないので誤読しやすい。
+> 走査するなら必ず `FD_SETSIZE` で止める。（下流プロジェクトの番犬が実際に踏んだ）
+
+### 5.3 その他の切り分け
 
 - デッドロックっぽい → ロック順序（[CLAUDE.md 鉄則 3](../CLAUDE.md)）
 - refcount が変 → `sPtr` 以外の smart pointer 混入を疑う（[CLAUDE.md 禁止リスト](../CLAUDE.md)）
 - 状態が飛ばない/ハング → I/O をイベント分岐の中で呼んでいないか（[GOTCHAS §9](GOTCHAS.md)）
+- 自分の関数から戻る前に自分が消える → [COOKBOOK §13.5](COOKBOOK.md)（`TS_SELF_GUARD` / `STD_SELF_GUARD`）
 
 ---
 

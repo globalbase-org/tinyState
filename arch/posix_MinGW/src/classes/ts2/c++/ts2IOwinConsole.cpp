@@ -206,8 +206,11 @@ TS_THREAD(FIN_ts2IOwinConsole_START)
 		waitHandle = NULL;
 	}
 	if ( io.is_notNull() ) {
-		if ( io_ref ) { io->delRefio(ifThis); io_ref = 0; }	/* drop reactor keep-alive */
 		io->detach(ifThis);
+		/* keep-alive last: this pin is held for our whole life, so dropping it may
+		   be the final reference — `io` and `io_ref` are read before the call, and
+		   nothing touches `this` after it. */
+		if ( io_ref ) { io_ref = 0; io->delRefio(ifThis); }	/* drop reactor keep-alive */
 	}
 	/* do NOT CloseHandle: GetStdHandle returns a process-owned std handle.
 	   Bypass the descriptor FIN (which closes fd); go straight to ts2IO. */
