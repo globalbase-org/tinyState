@@ -212,7 +212,11 @@ foreach(layer ${arch_layers})
       get_filename_component(dst_dir ${dst} DIRECTORY)
       file(MAKE_DIRECTORY ${dst_dir})
       file(REMOVE ${dst})
-      if(WIN32)
+      # CMAKE_HOST_WIN32, not WIN32: the link is made now, on the machine running
+      # cmake, so what matters is the host -- WIN32 follows the *target* and is true
+      # for a MinGW cross build from Linux.  Taking the hard-link branch there fails
+      # with EXDEV as soon as the build tree is not on the repository's filesystem.
+      if(CMAKE_HOST_WIN32)
         # NTFS symlink needs SeCreateSymbolicLinkPrivilege (dev-mode / admin).
         # Hard link works with no privilege; overlay is same-volume, per-file
         # (GLOB_RECURSE), so the hard-link constraints are satisfied. Windows-port design memo §6.2.

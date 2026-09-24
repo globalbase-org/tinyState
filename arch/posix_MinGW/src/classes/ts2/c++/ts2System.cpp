@@ -36,7 +36,10 @@
  * VERIFIED ON THE BOX.  Two faults that only a run could show were found and
  * fixed on 2026-07-16: a child pipe end has to be created FILE_FLAG_OVERLAPPED
  * for a tinyState child's overlapped read to ever complete, and this object has
- * to stay pinned until RegisterWait is unregistered.
+ * to stay pinned until RegisterWait is unregistered.  That pin is the reactor's
+ * refio (addRefio(ifThis)), not a self-ref: a self-ref holds the object up
+ * without the reactor knowing, so fwIO would see refio == 0 with nothing
+ * registered and teardown would start while the wait is still armed.
  * DM_TTY (pty) is not supported (ConPTY is a later refinement, Windows-port design memo §8).
  */
 
@@ -150,10 +153,13 @@ protected:
 
 	sPtr<ts2IO>	d_rfd;
 	sPtr<ts2IO>	d_efd;
-	sPtr<tinyState>	wait_pin;	/* self-ref held while the RegisterWait is armed,
-					   released only after UnregisterWaitEx — so the
-					   object cannot be freed while on_exit_cb may still
-					   fire with a raw `this`. */
+	/* No self-ref here.  Keeping ourselves alive with a plain sPtr would hold the
+	   object up without telling the reactor anything: fwIO would see nothing
+	   registered and refio == 0, tsApplication would read that as "nothing left to
+	   wait for", and teardown would run while the OS wait is still armed and
+	   on_exit_cb can still fire with a raw `this`.  The keep-alive has to be the
+	   thing the reactor counts, so it is addRefio(ifThis) -- which pins us AND is
+	   visible -- held until UnregisterWaitEx has actually disarmed the wait. */
 };
 
 TS_END_IMPLEMENT
@@ -429,9 +435,12 @@ TS_STATE(ACT_FINISH)
 #else	/* mode 1: keep the reactor alive with a refcount, not a dummy read.
 	   Without this the loop would see nothing registered and break out
 	   (== the old (1)'s "reactor tore down before the child-exit callback
-	   fired" == output destruction). */
+	   fired" == output destruction).
+	   Named, not anonymous: the same call then also pins us for as long as the
+	   wait is armed, so no separate self-ref is needed -- and a self-ref would
+	   not do, because it keeps the object alive without the reactor knowing. */
 		if ( io.is_notNull() )
-			io->addRefio();
+			io->addRefio(ifThis);
 #endif
 		if ( !RegisterWaitForSingleObject(&waitHandle,hProcess,on_exit_cb,
 				this,INFINITE,WT_EXECUTEONLYONCE) ) {
@@ -454,7 +463,6 @@ TS_STATE(ACT_FINISH)
 				" (GetLastError=%lu, child pid=%d) — polling the child"
 				" once a second instead\n",(unsigned long)gle,this->ret);
 		}
-		wait_pin = ifThis;	/* pin the object alive until FIN_UNREGISTER */
 	}
 	return rDO|ACT_FINISH_RET;
 }
@@ -497,14 +505,10 @@ TS_STATE(FIN_START)
 {
 	this->parent->eventHandler(
 		thNEW( stdEvent,(TSE_RETURN,ifThis,(INTEGER64)status)));
-	if ( io.is_notNull() )
-#if TS2SYS_CHILDWAIT_MODE == 2
-		io->detach(ifThis);
-#else	/* mode 1: drop the keep-alive refcount; delRefio()'s wake() nudges the
-	   main loop to re-check its exit condition (now refio==0, nothing
-	   registered → the reactor returns cleanly). */
-		io->delRefio();
-#endif
+	/* The keep-alive is NOT dropped here.  The wait is still armed until
+	   FIN_UNREGISTER runs UnregisterWaitEx, and on_exit_cb can still fire until
+	   then; releasing the reactor now would let the loop return while a callback
+	   is pending.  It is released after the wait is actually disarmed. */
 	if ( d_rfd != thNULL )
 		d_rfd->destroy();
 	if ( d_efd != thNULL )
@@ -523,6 +527,28 @@ TS_THREAD(FIN_UNREGISTER)
 	}
 	if ( hProcess ) { CloseHandle(hProcess); hProcess = NULL; }
 	if ( hJob )     { CloseHandle(hJob);     hJob = NULL; }
-	wait_pin = thNULL;	/* wait is unregistered; safe to drop the self-ref */
+	/* The wait is disarmed and any in-flight callback has finished, so nothing can
+	   reach us through the raw `this` any more.  Hand the release back to the state
+	   machine rather than doing it here: see FIN_UNPIN. */
+	return rDO|FIN_UNPIN;
+}
+/* Releasing the keep-alive drops the pin that has been holding this object up, so
+   it is the one call here that can be its own last reference.  It is taken in
+   ACT_FINISH, a TS_STATE, and it is released here, a TS_STATE -- deliberately not
+   in FIN_UNREGISTER above.  That one is a TS_THREAD: mtx is released and the body
+   runs on a pool worker, so dropping the final reference there would do it outside
+   the serialisation the state machine gives every other transition, with the
+   worker's own bookkeeping still to come.  Leaving a TS_THREAD for a TS_STATE
+   costs nothing -- only *entering* one needs the pool -- so the symmetric, quieter
+   context is free. */
+TS_STATE(FIN_UNPIN)
+{
+	/* last statement: may be the final reference, so nothing may touch `this` after */
+	if ( io.is_notNull() )
+#if TS2SYS_CHILDWAIT_MODE == 2
+		io->detach(ifThis);
+#else
+		io->delRefio(ifThis);
+#endif
 	return rDO|FIN_TINYSTATE_START;
 }

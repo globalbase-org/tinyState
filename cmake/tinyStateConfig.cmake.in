@@ -38,8 +38,16 @@ endif()
 # tscpp2.bat (installed next to it) is picked up by cmd.exe via PATHEXT and
 # runs the script through perl; MSYS2/Cygwin bash uses the shebang directly.
 # Either way callers invoke plain `tscpp2`.  Windows-port design memo.
-set(TINYSTATE_TSCPP2 "${TINYSTATE_PREFIX}/bin/tscpp2"
-    CACHE FILEPATH "tinyState code generator (tscpp2)")
+# ★ **キャッシュしない。** `CACHE FILEPATH` にすると一度書かれた値が残り、利用側が
+# `tinyState_DIR` を別の prefix へ振り替えても **codegen だけ古い prefix を指したまま**に
+# なる。そうなると「A の prefix のライブラリ・ヘッダ」と「B の prefix の tscpp2」が
+# 組み合わさり、生成クラスのレイアウトがライブラリと食い違う — 沈黙して壊れ、誰かが
+# 違うオフセットを読むまで表に出ない。実際に利用側が踏みかけた (2026-09-22)。
+#
+# tscpp2 は **その package と対で使うもの**で、単独で差し替える正当な理由が無い。
+# だから毎回 package の位置から導出する (通常変数はキャッシュより優先されるので、
+# 既存のビルドディレクトリに古い値が残っていても、次の configure で正しくなる)。
+set(TINYSTATE_TSCPP2 "${TINYSTATE_PREFIX}/bin/tscpp2")
 
 # --- imported library targets ----------------------------------------------
 # 静的 (.a) と共有 (.so/.dylib/.dll) のどちらが install されているかは、ビルド時の

@@ -4,6 +4,10 @@
 #include        <sys/types.h>
 #include        <sys/wait.h>
 #include        <errno.h>
+#include        <signal.h>
+#if defined(__linux__)
+#include        <sys/syscall.h>		/* SYS_close_range (5.9+)。無ければ従来ループへ落ちる */
+#endif
 #include        <termios.h>
 
 #include	"_ts2/c++/ts2System_.h"
@@ -35,8 +39,23 @@ TS_BEGIN_IMPLEMENT
  *
  * **プロセスグループ kill / Process-group kill:**
  * 子プロセスは常に `setpgid(0,0)` で独立したプロセスグループに置かれる。
- * `destroy()` 時は `kill(-pgid, SIG)` でグループ全体を kill するため、
- * `sh -c` 経由の孫プロセスも確実に終了できる。
+ * `destroy()` 時は `kill(-pgid, SIG)` でグループ全体へ送るので、`sh -c` 経由の
+ * **孫プロセスにも届く**。
+ *
+ * ⚠ 「届く」ことと「終了する」ことは別である。以下は保証していない:
+ * - **SIGTERM を捕まえて終了しない**子/孫は死なない。捕捉も無視も block もできないのは
+ *   SIGKILL だけなので、終了を保証したいなら `DM_CONT_KILL` を使うこと。
+ * - 子/孫が自分で `setsid()` / `setpgid(0,0)` を呼んで**グループから出た**場合は、
+ *   どのシグナルでも届かない (デーモン化する子はこれをやる)。
+ * - `TSE_RETURN` は `waitpid` した **直接の子** の status である。`sh -c` 経由なら
+ *   それは sh の終了であって、**孫の終了を表さない**。sh が死んで孫が生き残った状態でも
+ *   `TSE_RETURN` は返る。
+ *
+ * / kill(-pgid, SIG) reaches grandchildren too, but reaching is not dying: a child or
+ * grandchild that catches SIGTERM survives (use `DM_CONT_KILL` if termination must be
+ * guaranteed), one that called `setsid()` has left the group and receives nothing, and
+ * `TSE_RETURN` carries the status of the *direct* child -- with `sh -c` that is sh's
+ * exit, not the grandchild's.
  *
  * **I/O / Pipes:**
  * `rfd` に子の stdout、`wfd` に子の stdin、`efd` に子の stderr を受け取る。
@@ -119,10 +138,12 @@ public:
 	 *   - `DM_CONT_KILL` (3): `destroy()` 時に SIGKILL を送り 1 秒ごとに再送し続ける。<br>
 	 *   - `DM_TTY` (0x100): 子の stdio を PTY で接続する (端末エミュレータ向け)。<br>
 	 *   - `DM_APPLY` (0x200): 呼び出し元が fd を事前に用意して渡す (高度な用途)。<br>
-	 *   kill は常にプロセスグループ全体 (`kill(-pgid, SIG)`) を対象にするため、
-	 *   `sh -c` 経由の孫プロセスも含めて終了する。<br>
+	 *   kill は常にプロセスグループ全体 (`kill(-pgid, SIG)`) を対象にするので、
+	 *   `sh -c` 経由の孫プロセスにも**届く**。ただし終了までは保証しない
+	 *   (捕まえて死なない子・グループから出た子には効かない)。詳細はクラスの説明を参照。<br>
 	 *   / Low byte (`DM_CMD`) selects kill mode; high byte (`DM_FLAG`) are ORed flags.
-	 *   Kill always targets the whole process group (`kill(-pgid, SIG)`).
+	 *   Kill always targets the whole process group (`kill(-pgid, SIG)`), so it reaches
+	 *   grandchildren; it does not guarantee they exit -- see the class description.
 	 */
 	ts2System_(
 		sPtr<tinyState> parent,
@@ -148,10 +169,13 @@ public:
 	 * @param mode
 	 *   - `DM_CONT_TERM`: SIGTERM を送り、1 秒ごとに再送し続ける。<br>
 	 *   - `DM_CONT_KILL`: SIGKILL を送り、1 秒ごとに再送し続ける (確実に殺したい場合)。<br>
-	 *   - `DM_NORMAL` (0): SIGTERM を 1 回送って終了を待つ (デフォルト destroy() と同じ)。<br>
-	 *   プロセスグループ全体が対象なので孫プロセスも含めて kill される。<br>
+	 *   - `DM_NORMAL` (0): SIGTERM を 1 回送って終了を待つ (デフォルト destroy() と同じ)。
+	 *     **1 回しか送らない**ので、捕まえて死なない子はそのまま生き残り、待ちは戻らない。<br>
+	 *   プロセスグループ全体が対象なので孫プロセスにも**届く** (終了の保証は上記のとおり
+	 *   `DM_CONT_KILL` のみ)。<br>
 	 *   / `DM_CONT_TERM`: SIGTERM every 1 s. `DM_CONT_KILL`: SIGKILL every 1 s.
-	 *   `DM_NORMAL`: single SIGTERM. Targets the entire process group.
+	 *   `DM_NORMAL`: a *single* SIGTERM -- a child that catches it and does not exit stays
+	 *   alive and the wait never returns.  Targets the entire process group.
 	 */
 	virtual void destroy(int mode);
 
@@ -358,6 +382,7 @@ ts2System_::do_exec(
 int     pipe_c2p[2],pipe_p2c[2];
 int 	pipe_err[2];
 int     pid;
+sigset_t saved_sigmask;		/* fork の前に止めた mask の退避先。fork 失敗時も親で戻す */
 
 //	_fd_r = _fd_w = _fd_err = -1;
 
@@ -457,7 +482,23 @@ sPtr<stdArray<sPtr<stdString> > > args;	/* MUST stay in scope until exec: args_c
 	}
 
         /* Invoke processs */
+	/* ★ fork の **前に** シグナルを止める。子側で戻すだけでは、fork が子で返ってから
+	 * 下のリセットの 1 命令目までがまだ親のハンドラで、窓が残る (狭いだけ)。
+	 * ここで止めておくと、その区間は **配送そのものが起こり得ない** —
+	 * 届いたシグナルは pending のまま待ち、子がハンドラを既定へ戻して mask を解いた
+	 * 時点で配送されて既定動作で死ぬ。⇒ 窓が狭くなるのではなく **無くなる**。
+	 * ★ 親側は「配送が µs 遅れる」だけで、**取りこぼしはしない** (pending は消えない)。
+	 *   止めるのは fork するスレッドの mask だけなので (pthread_sigmask)、プロセス宛の
+	 *   シグナルは止めていない他スレッドが受ける。
+	 * ⚠ SIGKILL / SIGSTOP は止められないが **捕捉もできない** = 食うハンドラが存在しない。
+	 * ⚠ pending なシグナルは子に継承されない ⇒ 子を誤って撃つことはない。 */
+	{
+	sigset_t block_all;
+		sigfillset(&block_all);
+		pthread_sigmask(SIG_BLOCK,&block_all,&saved_sigmask);
+	}
         if ( (pid = fork()) < 0 ){
+		pthread_sigmask(SIG_SETMASK,&saved_sigmask,NULL);
                 soCLOSE(pipe_c2p[R]);
 		soCLOSE(pipe_c2p[W]);
 		if ( !(dmode & DM_TTY) ) {
@@ -470,6 +511,37 @@ sPtr<stdArray<sPtr<stdString> > > args;	/* MUST stay in scope until exec: args_c
         }
         if ( pid == 0 ) {      /* I'm child */
 	int rc,fd;
+		/* ★ fork から exec までの子は **親のシグナル設定を引き継いだ親のコピー**である。
+		 * その窓の間に届いたシグナルは *親のハンドラ* に食われ、exec でハンドラが既定へ
+		 * 戻る頃にはもう残っていない。⇒ destroy() の kill(-pgid,SIGTERM) を撃ったのに
+		 * 子が死なず、呼び手は kill の rc=0 を見て成功と信じる。実際に踏んだ利用側では、
+		 * 撃った側が子の終了を待ち続け、子の寿命ぶん座り込んだ。
+		 * ⚠ 窓は狭くない。下の close ループは getdtablesize() 回まわるので、
+		 *   ulimit -n が大きい環境では **数十 ms** に達する (実測 524288 本で約 40ms)。
+		 * ⇒ 子に入ったら **何よりも先に** 捕捉中のシグナルを既定へ戻し、mask を解く。
+		 * ★ SIG_IGN は「exec を越えて継承される」ことが POSIX の仕様で、それに依存する
+		 *   呼び手 (バックグラウンドジョブの SIGINT 等) が居るので **触らない**。
+		 *   食われる原因はハンドラの方なので、これで足りる。 */
+		{
+		int sg;
+		sigset_t unblock_all;
+			for ( sg = 1 ; sg < NSIG ; sg ++ ) {
+			struct sigaction cur;
+				if ( sg == SIGKILL || sg == SIGSTOP )
+					continue;
+				/* ⚠ この continue は load-bearing。glibc の内部シグナル
+				 * (SIGCANCEL=32 / SIGSETXID=33 ・ NPTL が使う) は
+				 * **問い合わせ自体が EINVAL になる**ので、ここで避けている。
+				 * 「エラーを無視しているだけ」ではない。 */
+				if ( sigaction(sg,NULL,&cur) < 0 )
+					continue;
+				if ( cur.sa_handler == SIG_IGN || cur.sa_handler == SIG_DFL )
+					continue;
+				::signal(sg,SIG_DFL);
+			}
+			sigemptyset(&unblock_all);
+			sigprocmask(SIG_SETMASK,&unblock_all,NULL);
+		}
 		signal(SIGPIPE,signal_handler_empty);
 		if ( dmode & DM_TTY ) {
 	                ::close(pipe_p2c[W]);
@@ -490,9 +562,24 @@ sPtr<stdArray<sPtr<stdString> > > args;	/* MUST stay in scope until exec: args_c
                 	::close(pipe_err[W]);
 		}
 
-		rc = getdtablesize();
-		for ( fd = 3 ; fd < rc ; fd ++ )
-			::close(fd);
+		/* 3 番以降を全部閉じる。0/1/2 は上で dup2 済みなので、ここから上は
+		 * 「親から引き継いだかもしれない何か」しかない。
+		 * ★ getdtablesize() は ulimit -n を返すので、素直にループすると
+		 *   **system() 1 回につき close() が ulimit -n 回**走る。ulimit -n = 524288 の
+		 *   機体では fork→exec が 40ms かかっていた (子プロセスを作る全経路に乗る固定費)。
+		 * ⇒ Linux では close_range で 1 回の syscall に畳む。無い/古いカーネルでは
+		 *   失敗が返るだけなので、そのままループへ落ちる。
+		 * ⚠ ここは fork 後の子なので async-signal-safe なものだけ。syscall() は可、
+		 *   opendir("/proc/self/fd") で数える手は malloc を踏むので採れない。 */
+		rc = -1;
+#if defined(__linux__) && defined(SYS_close_range)
+		rc = ::syscall(SYS_close_range,(unsigned)3,~0U,0);
+#endif
+		if ( rc < 0 ) {
+			rc = getdtablesize();
+			for ( fd = 3 ; fd < rc ; fd ++ )
+				::close(fd);
+		}
 
 		setpgid(0,0);	// always: put child in its own pgroup so kill(-pgid) reaches grandchildren
 		if ( command[0] == '#' ) {
@@ -517,6 +604,11 @@ sPtr<stdArray<sPtr<stdString> > > args;	/* MUST stay in scope until exec: args_c
                         _Exit(1);
                 }
         }
+
+	/* 親の mask を戻す。止めていたのは fork の窓を無くすためだけなので、ここより先へ
+	 * 持ち越さない。止めている間に届いたシグナルは pending で残っているので、この直後に
+	 * 配送される — 遅れるだけで、落ちない。 */
+	pthread_sigmask(SIG_SETMASK,&saved_sigmask,NULL);
 
 	setpgid(pid, pid);	// race guard: parent also calls setpgid before any kill
 

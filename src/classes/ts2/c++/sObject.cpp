@@ -511,16 +511,28 @@ pthread_t tid;
 
 	if ( refMutex_init == 0 ) {
 	pthread_mutexattr_t attr;
-		pthread_mutexattr_settype(&attr,PTHREAD_MUTEX_RECURSIVE);
-		if ( (er = pthread_mutex_init(&refMutex,&attr)) ) {
+	int recursive;
+		/* pthread_mutexattr_init を先に呼ぶこと。素の attr に settype すると
+		 * スタックの中身次第で glibc が assert で落ちる (tpp.c の
+		 * __pthread_tpp_change_priority)。しかも落ちるのは settype の中なので、
+		 * 下の非再帰フォールバックには届かない — 保険が効かない形だった。
+		 * attr を用意する 3 手はどれも失敗しうるので、どれが転んでも同じ
+		 * フォールバック (refMutex_init = 2 = 手作業で再帰を数える) へ落とす。 */
+		recursive = 0;
+		if ( pthread_mutexattr_init(&attr) == 0 ) {
+			if ( pthread_mutexattr_settype(&attr,PTHREAD_MUTEX_RECURSIVE) == 0 )
+				recursive = ( pthread_mutex_init(&refMutex,&attr) == 0 );
+			pthread_mutexattr_destroy(&attr);
+		}
+		if ( recursive )
+			refMutex_init = 1;
+		else {
 			refMutex_init = 2;
 			if ( (er = pthread_mutex_init(&refMutex,0)) ) {
 				fprintf(stderr,"%s\n",strerror(er));
 				stdObject::panic("refLock-0");
 			}
 		}
-		else
-			refMutex_init = 1;
 	}
 	if ( refMutex_init == 1 ) {
 		if ( (er=pthread_mutex_lock(&refMutex)) ) {

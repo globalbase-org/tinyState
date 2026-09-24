@@ -163,6 +163,7 @@ ts_io_filter_zom2(sPtr<fwIOdata>  dd)
 int
 fwIO::loop(sPtr<tsApplication> app)
 {
+int stable_wait = 0;
 sPtr<fwIOptr>  idppptr;
 	idppptr = thNEW( fwIOptr,());
 sPtr<stdQueue<fwIOdata> >  result;
@@ -207,10 +208,22 @@ DWORD bytes; ULONG_PTR key; OVERLAPPED * ov;
 				app->frameWorkEvent(0);
 				continue;
 			}
-			/* nothing left to wait on -> return */
+			/* nothing left to wait on -> return.
+			 * 抜けてよいのは登録も interval も keep-alive も無いことに加えて
+			 * **gc が静か** なときだけ。refEventHead に auto-teardown の refEvent が
+			 * 残っている間は、これから TS_THREAD 状態へ入る個体が居る — その ins() は
+			 * 畳み終わったプールに届き、仕事は拾われずに捨てられる。
+			 *
+			 * 待ちは wait_stable() に任せる (gc スレッドは安定へ遷移した時点で既に
+			 * broadcast している)。★ mu の外で眠ること: ここで眠ると gc が refEvent から
+			 * io->read() を呼んだときに mu で止まり、gc が静かになれず永久に起きない
+			 * (mu -> refMtx の辺は addRefio が既に持っている)。 */
 			if ( this->read_objs->count == 0 && this->write_objs->count == 0 &&
-					!have_interval && refio == 0 )
-				break;
+					!have_interval && refio == 0 ) {
+				if ( stdObject::is_stable() )
+					break;
+				stable_wait = 1;
+			}
 
 			if ( have_interval ) {
 				INTEGER64 sub = idppptr->ptr->data - stdInterval::now();
@@ -219,6 +232,11 @@ DWORD bytes; ULONG_PTR key; OVERLAPPED * ov;
 			wait_flag = 0;
 		}
 		backup = thNULL;
+		if ( stable_wait ) {		/* ★ mu を離してから眠る */
+			stable_wait = 0;
+			stdObject::wait_stable();
+			continue;		/* 起きたら全部評価し直す */
+		}
 
 		/* --- wait on the completion port --- */
 		BOOL okc = GetQueuedCompletionStatus((HANDLE)iocp,&bytes,&key,&ov,timeout_ms);

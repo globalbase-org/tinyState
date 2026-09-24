@@ -234,7 +234,16 @@ stdObject::gc_thread(void * arg)
 			 * これが無いと wait_stable() を起こす者が誰も居らず永眠する。 */
 			if ( refList[0] == 0 && refFlags[0] == 0 && refEventHead[0] == 0 )
 				refCond->broadcast();
-			for ( ; refList[0] == 0 && refFlags[0] == 0 ; ) {
+			/* refEventHead も見る。ここを見落とすと、掃くべき refEvent が
+			 * 在るのに述語が真になり、起こされても掃かずに寝直す。
+			 * relref() は bucket 0 のとき refEventHead[0] へ積んで broadcast し、
+			 * refFlags を触らずに返る (id>0 は refFlags が 0 まで伝播するので
+			 * この形にならない) ので、その状態は実際に作れる。
+			 * is_stable() / wait_stable() / 上の broadcast は 3 つとも
+			 * refEventHead を見ているので、ここだけが食い違っていた。
+			 * finish_flag が立っていても、まず掃いてから抜ける。 */
+			for ( ; refList[0] == 0 && refFlags[0] == 0
+					&& refEventHead[0] == 0 ; ) {
 				if ( finish_flag ) {
 				  	finish_flag = 2;
 					refCond->signal();

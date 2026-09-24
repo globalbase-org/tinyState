@@ -259,6 +259,7 @@ ts_io_filter_zom2(sPtr<fwIOdata>  dd)
 int
 fwIO::loop(sPtr<tsApplication> app)
 {
+int stable_wait = 0;
 int ret;
 int rret;
 fd_set fdwrite;
@@ -326,9 +327,24 @@ INTEGER64 nn;
 				app->frameWorkEvent(mfd->maxfd);
 				continue;
 			}
+			/* 反応器が「もう仕事は無い」と抜けてよいのは、登録も interval も
+			 * keep-alive も無いことに加えて **gc が静か** なときだけ。
+			 * refEventHead に auto-teardown の refEvent が残っている間は、これから
+			 * TS_THREAD 状態へ入る個体が居る — その ins() は畳み終わったプールに
+			 * 届き、仕事は拾われずに捨てられる。
+			 *
+			 * 待ちは wait_stable() に任せる。gc スレッドは安定へ遷移した時点で
+			 * 既に broadcast しているので、ポーリングは要らない。
+			 * ★ ただし wait_stable() を **mu の外** でやること。ここで眠ると
+			 *   gc が refEvent から io->read() を呼んだときに mu で止まり、
+			 *   gc が静かになれないので永久に起きない (mu -> refMtx の辺は
+			 *   addRefio が既に持っている)。 */
 			if ( mfd->maxfd == 0 && idppptr->ptr == thNULL && refio == 0 ) {
-				ret = rret;
-				break;
+				if ( stdObject::is_stable() ) {
+					ret = rret;
+					break;
+				}
+				stable_wait = 1;
 			}
 			FD_SET(FW_PFD_READ,&fdread);
 			FD_SET(FW_PFD_READ,&fdexp);
@@ -337,6 +353,11 @@ INTEGER64 nn;
 			wait_flag = 0;
 		}
 		backup = thNULL;
+		if ( stable_wait ) {		/* ★ mu を離してから眠る */
+			stable_wait = 0;
+			stdObject::wait_stable();
+			continue;		/* 起きたら全部評価し直す */
+		}
 		if ( stdFrameWork::trace_all )
 			dump_maskbits(
 				stdFrameWork::trace_all,
