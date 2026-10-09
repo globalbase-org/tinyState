@@ -114,6 +114,28 @@ TS_STATE(ACT_WAIT) {
 
 どうしても待ち合わせが必要なら、<b>待ちには必ず締切を付ける</b> (上の 5-1)。締切のない待ちはハングとして現れ、原因の切り分けにコストがかかる。
 
+### 6. 状態関数に長いループを書くなら enter_time で予算を切る
+
+状態関数が回り続けている間、そのスレッドは占有されたままで<b>他の tinyState 派生クラスは一切動けない</b>。
+protected メンバ `enter_time` が eventHandler() の<b>入場時刻</b> (マイクロ秒・`stdInterval::now()` と同じ尺度)
+を持っているので、予算を超えたら自分で抜ける。
+
+```cpp
+TS_STATE(ACT_LOOP) {
+    for ( ; ; ) {
+        if ( finished() ) return rDO|ACT_DONE;
+        one_step();
+        if ( enter_time + 100*1000 < stdInterval::now() ) break;   // 0.1 秒で譲る
+    }
+    application->gc->exe(ifThis);     // 起こし直しと必ず対で書く
+    return ACT_RET;                   // ★ rDO 無し = スレッドを返す
+}
+TS_STATE(ACT_RET) { R_TEST return rDO|ACT_LOOP; }
+```
+
+<b>譲るのは `rDO` の有無</b>。`rDO|` 付きの return は同じディスパッチの中で次の状態へ進むだけで、
+スレッドは手放さない。詳細と対照実験は [COOKBOOK §6.1](docs/COOKBOOK.md)。
+
 ## 禁止リスト
 
 以下は <b>tinyState ストラテジーで書かれたコード内では使わない</b>。
@@ -125,7 +147,7 @@ TS_STATE(ACT_WAIT) {
 | `std::async` / `std::future` | `thNEW` + `TSE_RETURN` 待ち |
 | `std::shared_ptr` / `std::unique_ptr` | `sPtr<T>` |
 | 生 `mutex` / `std::mutex` | `sThreadMutex` (スレッド同期用) または `stdMutex` (状態遷移用) |
-| `TS_STATE` 内での blocking I/O / 長ループ | `TS_THREAD` に移すか、 `ts2IO*` ラッパ経由で yield 化 |
+| `TS_STATE` 内での blocking I/O / 長ループ | `TS_THREAD` に移すか、 `ts2IO*` ラッパ経由で yield 化。ループが避けられないときは `enter_time` で予算を切る (鉄則 6) |
 
 ## 推奨イディオム
 
@@ -228,6 +250,8 @@ TS_STATE(ACT_SOME_RET) {
 
 `eventHandler()` 呼び出しが再帰的になる場合も、直前に `application->gc->exe` を挟むとその時点でスタックがパージされ再帰デッドロックを回避できる。
 
+**入れ子が深くなりすぎた場合は、フレームワークが同じ逃がし方を自動で行う** (`tsApplication::evh_depth`・既定は機ごとに `min(1500, 実スタック/4KB)`)。スタックオーバーフローによる沈黙死 (メッセージ無しの SIGSEGV) を防ぐための最後の安全網で、超えた入場は**イベントごと** gc のキューへ回る。<b>ただし順序は保証されない</b>ので、順序に依存するコードを深い入れ子の中に置かないこと。自分で `exe(ifThis)` を挟む方が順序を決められるぶん上。詳細と実測は [COOKBOOK §6.1](docs/COOKBOOK.md)。
+
 ### 派生クラスの INI/FIN 連鎖
 
 INI は A → B → C 順、FIN は C → B → A 順 (逆順) で連鎖させる。
@@ -312,6 +336,23 @@ if ( C_TEST(a->state(), C_ZOM) ) { ... }
 - 引数セットアップ用マクロは `tscpp2 new` が自動生成
 
 過去はコンストラクタで初期化してたが、現在は INI_START 主体。
+
+#### ★ 仕様: `TS_STATE(INI_START)` は `thNEW` の中で走り切る
+
+`thNEW(X,(...))` が戻った時点で、<b>`TS_STATE(INI_START)` とそこから `rDO` で繋がった連鎖は
+実行済み</b>。呼び手は<b>次の行から使える</b>。これは保証。
+
+<b>ただし次の 2 つはその限りではない</b> — どちらも `thNEW` は初期化が済む前に戻る:
+
+| | 何が起きるか |
+|---|---|
+| <b>`TS_THREAD(INI_START)`</b> | プールに積んで即戻る。状態関数は後から別スレッドで走る |
+| <b>`INI_START` の中で yield した</b> | `read_c`/`write_c` の EAGAIN で `sException` → 中断して後で先頭から再走 (鉄則 5) |
+
+⇒ この 2 つを使うなら、呼び手が待てる形 (`listen` / `C_TEST(p->state(),C_INI)`) にすること。
+⇒ この保証があるために、<b>構築の連鎖 (INI_START の中で thNEW を繰り返す形) は深さを gc へ
+逃がせない</b> (鉄則 6 の安全網の対象外)。保証を取るか深さを取るかの択で、保証を取っている。
+詳細は [COOKBOOK §10](docs/COOKBOOK.md)。
 
 ### デストラクタ
 

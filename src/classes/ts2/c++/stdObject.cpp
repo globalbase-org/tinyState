@@ -7,6 +7,7 @@
 #include	"ts2/c++/sThreadCond.h"
 
 #include	"_ts2/c++/tinyState_.h"
+#include	"ts2/c++/sThreadStack.h"	/* gc スレッドのスタックを揃える */
 class tinyState;
 
 #define delayedGC_MAX		1000
@@ -141,6 +142,11 @@ pthread_t		phy_thread;
 	start_flag = 1;
 	pthread_attr_init(&phy_attr);
 	pthread_attr_setdetachstate(&phy_attr,PTHREAD_CREATE_DETACHED);
+	/* gc スレッドにも worker と同じスタックを与える。
+	 * 深すぎる eventHandler の入れ子はここへ逃がされ、この スレッドで深さ 1 から
+	 * 配送し直されるので、逃がし先が機ごとに浅いと往復回数だけが増える。
+	 * tsThread の worker と同じ理由・同じ値。 */
+	pthread_attr_setstacksize(&phy_attr,(size_t)ts2_worker_stack_size());
 	pthread_create(&phy_thread,&phy_attr,stdObject::gc_thread,(void*)0);
 }
 

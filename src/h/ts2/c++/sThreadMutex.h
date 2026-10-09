@@ -5,6 +5,7 @@
 
 #include	"ts2/c++/sObject.h"
 #include	<pthread.h>
+#include	<errno.h>
 #include	<functional>
 
 class sThreadCond;
@@ -41,12 +42,17 @@ public:
 	}
 	virtual int is_locked() {
 	int ret;
+		/* ★ pthread_mutex_trylock は失敗を *正の errno* (EBUSY=16 等) で返し、
+		 * errno は設定しない。旧コードは `ret < 0` と errno を見ていたので
+		 *   ・他スレッドが保持中を **一度も検出できず** 「0 = 空いている」を返し
+		 *   ・そのうえ保持していない mutex を unlock していた
+		 * (EPERM が捨てられるので無害に見えていた)。
+		 * / pthread_mutex_* report failure as a POSITIVE errno, never as -1. */
 		ret = trylock();
-		if ( ret < 0 ) {
-			if ( errno == EBUSY )
-				return 1;
+		if ( ret == EBUSY )
+			return 1;
+		if ( ret != 0 )
 			return -1;
-		}
 		unlock();
 		return 0;
 	}

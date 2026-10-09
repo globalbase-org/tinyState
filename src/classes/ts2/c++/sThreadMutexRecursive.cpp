@@ -25,7 +25,10 @@ sThreadMutexRecursive::lock()
 {
 int ret;
 	ret = sThreadMutex::lock();
-	if ( ret < 0 )
+	/* ★ pthread_mutex_lock の失敗は *正の errno*。`< 0` で見ていたので、
+	 * 失敗したのに count++ / id=self へ落ちて「持っていないのに持った」
+	 * ことになっていた。 */
+	if ( ret != 0 )
 		return ret;
 	count ++;
 	id = pthread_self();
@@ -35,10 +38,19 @@ int ret;
 int 
 sThreadMutexRecursive::unlock()
 {
+int ret;
 	if ( count <= 0 )
 		stdObject::panic("unlock");
+	/* count を先に減らすのは意図どおり (counter() は mutex 下で読むので、
+	 * 最後のレベルを返した後に減らすと他スレッドが古い値を読む)。
+	 * ★ ただし旧コードは戻り値を捨てていたので、持ち主でないスレッドの
+	 * unlock が EPERM で静かに失敗したまま count だけ狂った。
+	 * 返せなかったら count を戻し、エラーを呼び手へ渡す。 */
 	count --;
-	return sThreadMutex::unlock();
+	ret = sThreadMutex::unlock();
+	if ( ret != 0 )
+		count ++;
+	return ret;
 }
 
 int
@@ -57,12 +69,15 @@ int
 sThreadMutexRecursive::is_locked()
 {
 int ret;
+	/* ★ trylock の失敗は *正の errno*。旧コードは `ret < 0` と errno を見て
+	 * いたので他スレッド保持中を検出できず、しかも**持っていない mutex を
+	 * unlock して**いた。基底 (sThreadMutex) と同じ意味に揃える:
+	 * 1 = ロック中 / 0 = 空き / -1 = エラー。 */
 	ret = sThreadMutex::trylock();
-	if ( ret < 0 ) {
-		if ( errno == EBUSY )
-			return 0;
+	if ( ret == EBUSY )
+		return 1;
+	if ( ret != 0 )
 		return -1;
-	}
 	if ( count )
 		ret = 1;
 	else	ret = 0;

@@ -161,6 +161,13 @@ configure_file(
   ${CMAKE_BINARY_DIR}/tinyState_config.h
 )
 
+# 版の文字列はコミットごとに変わるので、全 TU が引く config ヘッダから分けてある。
+# 引くのはツリー内で tinyState.cpp だけ (= install で下流が焼き直らない)。
+configure_file(
+  ${PROJECT_SOURCE_DIR}/cmake/revision.h.in
+  ${CMAKE_BINARY_DIR}/tinyState_revision.h
+)
+
 # ---- arch overlay ----
 # OS / ディストリごとに散在する arch/<layer>/src/{h,classes} を symlink で
 # build/arch_overlay/ に重ね合わせる。後段の layer が前段を上書きする。
@@ -298,8 +305,9 @@ endif()
 install(DIRECTORY ${CMAKE_BINARY_DIR}/_ts2
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-# 4. configure_file 生成の tinyState_config.h
+# 4. configure_file 生成の tinyState_config.h / tinyState_revision.h
 install(FILES ${CMAKE_BINARY_DIR}/tinyState_config.h
+              ${CMAKE_BINARY_DIR}/tinyState_revision.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/std2)
 
 # 5. Perl スクリプト群 (proj/utils/)
@@ -362,3 +370,19 @@ add_test(NAME tinyState_no_static_dtor
           $<TARGET_FILE:tinyState2>
           ${PROJECT_SOURCE_DIR}/test/no_static_dtor_allow.txt
           ${CMAKE_BINARY_DIR}/no_static_dtor)
+
+# 版の文字列が「成果物に在る」かつ「全 TU が引くヘッダに無い」ことを守る。
+# この 2 つは同じ変更の裏表で、片方だけ戻すと静かに劣化する:
+#   ・ヘッダに戻ると install ごとに下流の全 TU が mtime で焼き直る (利用側の実測で
+#     884 TU ・ Linux 約 6.5 分 ・ Windows(MSYS2) は建て直し 60 分 + 検定 42 分。
+#     TU 数は利用側の構成で変わる — 同じ相手の別構成では 662 TU ・ 約 4 分だった)
+#   ・専用の TU に移すと誰からも参照されず、静的リンクで .o ごと落ちて消費側に入らない
+# 根拠は docs/BUILD_INTERNAL.md §8。
+# ⚠ ここも毎回較正してから測る (0 件を言う前に当たる例を 1 つ通す)。
+add_test(NAME tinyState_revision_burned_in
+  COMMAND sh ${PROJECT_SOURCE_DIR}/test/revision_burned_in.sh
+          ${CMAKE_NM}
+          $<TARGET_FILE:tinyState2>
+          ${CMAKE_BINARY_DIR}/tinyState_config.h
+          ${CMAKE_BINARY_DIR}/tinyState_revision.h
+          ${CMAKE_BINARY_DIR}/revision_burned_in)

@@ -17,6 +17,7 @@ CREATE_SUBDIRS         = NO
 INPUT                  = src/h \
                          build/_ts2 \
                          build/tinyState_config.h \
+                         build/tinyState_revision.h \
                          docs \
                          CLAUDE.md
 INPUT_ENCODING         = UTF-8

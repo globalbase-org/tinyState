@@ -20,8 +20,12 @@ public:
 		:
 		mtx(_mtx)
 	{
-		if ( mtx.unlock() < 0 )
-			sObject::panic("UNLOCK mutex handleRelease error");
+		/* ★★ ここが「一時解放が失敗しても黙って通る」の入口だった。
+		 * pthread_mutex_unlock の失敗は *正の errno* (EPERM 等) なので
+		 * `< 0` の panic は **機械語でも符号ビットだけを見ていて絶対に
+		 * 発火しない** (arm64 で tbnz w0,#0x1f を確認)。 */
+		if ( mtx.unlock() != 0 )
+			sObject::panic("UNLOCK mutex handleRelease error (not the owner?)");
 	}
 	sThreadMutexHandleRelease(const sThreadMutexHandleRelease & hdr) 
 		:
@@ -30,7 +34,9 @@ public:
 		sObject::panic("mutex handleRelease's copy is not permitted");
 	}
 	~sThreadMutexHandleRelease() {
-		mtx.lock();
+		/* ★ 取り直せなかったら「持っているつもり」で先へ進む。 */
+		if ( mtx.lock() != 0 )
+			sObject::panic("LOCK mutex handleRelease error");
 	}
 	void operator =(sThreadMutex & _mtx) {
 		sObject::panic("mutex handleRelease's copy is not permitted");

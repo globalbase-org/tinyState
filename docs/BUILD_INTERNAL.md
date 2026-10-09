@@ -267,7 +267,10 @@ project(tinyState VERSION 2.0.0 LANGUAGES C CXX)
 1. **`tinyState_config.h`**（`cmake/config.h.in` を `configure_file` で生成、`include/std2/` に install）
    - `TS_VERSION` … `"2.0.0"`（文字列）
    - `TS_VERSION_MAJOR` / `_MINOR` / `_PATCH` … `2` / `0` / `0`（整数、条件コンパイル用）
-   - `TS_REVISION` … git 由来リビジョン（下記）
+   - `HAVE_*` … 機能検出の結果
+   - ★ **`TS_REVISION` はここには無い**（下記。`std2/tinyState_revision.h` へ分けた）
+1b. **`tinyState_revision.h`**（`cmake/revision.h.in` から生成、`include/std2/` に install）
+   - `TS_REVISION` … git 由来リビジョン（下記）。**ツリー内で引くのは `tinyState.cpp` だけ**
 2. **CMake パッケージ版数ファイル** `tinyStateConfigVersion.cmake`（`write_basic_package_version_file`、`COMPATIBILITY SameMajorVersion`）
    - これで消費側が `find_package(tinyState 2.0 REQUIRED)` と版数指定でき、`2.x` は満たすが `3.x` は弾く
 
@@ -286,6 +289,39 @@ git describe --tags --always --dirty --long
 - **configure 時のスナップショット**。`cmake -B build .` 以降のコミット/編集は、**再 configure するまで反映されない**。
 - 旧 SVN 前提の `utils/version.pl` はこの仕組みに置き換えて削除済み。
 
+#### ★ なぜ `tinyState_config.h` から分けてあるか
+
+`tinyState_config.h` は `std2/includes.h` 経由で **全 TU が引く**。版の文字列は
+**コミットごとに変わる**ので、そこに置くと install するたびに（内容が 1 行しか
+違わなくても）**mtime だけで下流の全 TU が焼き直る**。利用側の実測で
+**884 TU ・ Linux 約 6.5 分**、Windows (MSYS2) では **建て直し約 60 分 + フル検定約 42 分**。
+（TU 数は利用側の構成で変わる。同じ相手の別構成では 662 TU ・ 約 4 分だった。効くのは桁であって特定の数ではない。）
+版を 1 行直すだけの install でも同じだけかかっていた。
+
+⇒ 版は `std2/tinyState_revision.h` に分け、**ツリー内で引くのは `tinyState.cpp` 1 本だけ**に
+してある。`tinyState_config.h` は semver と機能検出の結果しか持たないので、**版では変わらない**。
+
+#### ★ 版を成果物に焼き込む（`ts2_revision()`）
+
+ヘッダのマクロが答えるのは「**いまコンパイルしているソースが見ているヘッダ**」の版で、
+**リンクされた実体**の版ではない。両者は食い違い得る（古い `/usr/local` に新しいヘッダで
+建てた、静的と共有を別の木から建てた、生成ヘッダが stale — どれも実際に起きている）。
+そこで `tinyState.cpp` に版の文字列を置き、`ts2_revision()`（`ts2/c++/ts2Revision.h`）で返す。
+
+```sh
+nm -C --defined-only libmyapp.so | grep ts2_revision
+strings myapp | grep -m1 'tinyState v'
+```
+
+- **常に引かれる TU に置くこと**。専用の TU に分けると、誰からも参照されないので
+  静的リンクで `.o` ごと落ちる（`example/whole-archive-test` が扱っているのと同じ盲点）。
+- **`.a` ではなく消費側を見ること**。「`.a` に在る」は「exe に入った」を意味しない。
+  消費側の実行体が薄い場合、文字列は中間の `.so` 側に入る。
+- 文字列は `const char[]`（名前空間スコープ・`const`）なので **internal linkage**。
+  `nm` では小文字 `r` の局所記号として出る（`ts2_revision()` が参照しているので消えない）。
+  `extern` が無い状態で「未参照なら落ちる」を検定しようとすると、**`.o` が引かれないから**
+  ではなく **コンパイラが未使用として捨てるから**消えるので、陰性対照が交絡する。
+
 ### タグ運用（プレリリース rc 方式）
 
 タグは「リリース地点を固定する点」。ブランチ（開発の線）とは独立で、`git describe` は HEAD の祖先を辿って最寄りの annotated タグを拾う。
@@ -300,7 +336,8 @@ git push origin v2.0.0
 
 # タグを打ったら TS_REVISION を更新（再 configure で git describe を取り直す）
 cmake -B build .
-#   → build/tinyState_config.h の TS_REVISION が "v2.0.0-0-g...." に変わる
+#   → build/tinyState_revision.h の TS_REVISION が "v2.0.0-0-g...." に変わる
+#     (tinyState_config.h は版では変わらない)
 ```
 
 - **annotated タグ（`-a`）を使う**。`git describe` はデフォルト annotated しか見ない（`--tags` で lightweight も拾えるが、リリースには annotated が定石）。
@@ -310,4 +347,4 @@ cmake -B build .
 
 ### Doxygen への反映
 
-`tinyState_config.h` は Doxyfile の `INPUT` に入っており、`TS_VERSION` / `TS_REVISION` はマクロとして doc 化される（`tinyState_config.h` ページ + マクロ索引）。タグ後に HP を更新するなら、再 configure → `doxygen Doxyfile` → §6 の rsync deploy の順。
+`tinyState_config.h` と `tinyState_revision.h` は Doxyfile の `INPUT` に入っており、`TS_VERSION` / `TS_REVISION` はマクロとして doc 化される（各ヘッダのページ + マクロ索引）。タグ後に HP を更新するなら、再 configure → `doxygen Doxyfile` → §6 の rsync deploy の順。

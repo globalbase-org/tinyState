@@ -143,8 +143,22 @@ sPtr<stdBuffer> head = buf->shift(&erp, &rest, &len);   // 先頭 len を切り�
 | クラス | 役割 | 取得方法 |
 |---|---|---|
 | `fwIO` | イベントループ / I/O リアクタ | `application->fw()` |
-| `tsGC` | GC・遅延 destroy | `application->gc` (public メンバ) |
+| `tsGC` | GC・遅延 destroy・長処理の yield 先 | `application->gc` (public メンバ) |
 | `tsThread` | TS_THREAD を実行する worker pool | `application->getThread()` |
+
+#### `tsGC::interval(INTEGER64 us)` — gc が一息に抱える時間の上限
+
+`tsGC` はキューに溜まった仕事を 1 回のディスパッチで配送し続ける。`interval()` が
+その上限 (マイクロ秒) で、超えると `ACT_START` 経由でスレッドを返し、他の状態機械に
+順番を回す。判定には `tinyState::enter_time` を使う ([COOKBOOK §6.1](COOKBOOK.md))。
+
+```cpp
+app->gc->interval(50*1000);        // 50ms に絞る
+INTEGER64 us = app->gc->interval();  // 既定は 100*1000
+```
+
+`0` 以下は「1 件配送するたびに譲る」。極端に大きい値は 2026-10-02 以前の
+「キューを空にするまで抱える」挙動に近づく。
 
 ### 3.1 `tsThread` — worker pool
 

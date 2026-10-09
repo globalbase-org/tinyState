@@ -9,6 +9,142 @@
 #include        <sys/syscall.h>		/* SYS_close_range (5.9+)。無ければ従来ループへ落ちる */
 #endif
 #include        <termios.h>
+#include        <spawn.h>
+#include        <stdlib.h>
+#include        <stdio.h>
+
+/* ---- posix_spawn 経路を使えるか ----
+ *
+ * fork は親のアドレス空間を COW 複製し、子は exec でそれを解体する。費用は **PTE の数**で
+ * 決まるので、ページが 4K 載りの親では両側で効く (実測: 親 10.0 ms/回 ・ 子の窓
+ * 15.2 ms ・ RSS 1GB 級)。posix_spawn は clone(CLONE_VM|CLONE_VFORK) で複製しないので、
+ * **親 RSS もページの種類も無関係に 0.3 ms で平ら**になる。実走で壁時計 30.1% 短縮。
+ *
+ * ★ 条件は posix_spawn が在ることだけでは足りない。**「3 番以降の fd を閉じる」手段**が
+ * 要る (従来の子は close_range(3,~0U) 相当をやっている)。それが無いまま spawn にすると、
+ * 親の fd が子へ漏れて「相手のパイプを掴んだままの子」ができ、EOF が来なくなる。
+ *
+ *   glibc 2.34+   posix_spawn_file_actions_addclosefrom_np   ← いま使っているのはこれ
+ *   macOS         POSIX_SPAWN_CLOEXEC_DEFAULT (Apple 拡張) で同じ効果が得られる **が、
+ *                 まだ有効にしていない**。理由 2 つ:
+ *                   ・mac 実機でコンパイルも実行も試していない (ひさ待ち)
+ *                   ・macOS の共有ライブラリでは `extern char **environ` が使えず
+ *                     `_NSGetEnviron()` が要る。dylib で建てるこのライブラリでは効く
+ *                 ⇒ mac を触れるときに、この #define を 1 つ足す形で有効化する
+ *   Cygwin        posix_spawn は fork/exec の皮なので得が無く、closefrom も無い
+ *
+ * 使えない環境は**従来の fork 経路**をそのまま通る (この層は Linux / macOS / Cygwin が
+ * 共有しているので、分岐は「posix 層の中で何が在るか」で決める。プラットフォーム名で
+ * 決め打たない)。
+ */
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+#define TS2_SPAWN_CLOSEFROM	1	/* posix_spawn_file_actions_addclosefrom_np */
+#define TS2_HAVE_SPAWN		1
+#endif
+
+#if defined(TS2_HAVE_SPAWN)
+extern char **environ;
+
+/* ★ A/B の口。既定 1 = posix_spawn ・ `TS2_USE_SPAWN=0` で従来の fork。
+ *
+ * **同じバイナリのまま両方を測れる**ことに意味がある: ビルドの違いが条件差に混ざらない
+ * (受け入れ検証がこの形で取られている)。関数内 static の初期化は
+ * スレッド安全 (C++11 magic statics) なので、環境変数は一度だけ読まれる。 */
+static int
+ts2_use_spawn()
+{
+	static const int v = []() -> int {
+		const char * e = ::getenv("TS2_USE_SPAWN");
+		return ( e && *e ) ? ::atoi(e) : 1;
+	}();
+	return v;
+}
+
+/* 子で既定へ戻すシグナルの集合を **親側で** 作る (従来は子が signal(SIG_DFL) を回していた)。
+ *
+ * ★ SIG_IGN は入れない。「SIG_IGN は exec を越えて継承される」のが POSIX の仕様で、
+ *   それに依存する呼び手が居る (バックグラウンドジョブの SIGINT 等)。食う原因はハンドラの
+ *   方なので、捕捉中のものだけを既定へ戻せば足りる。
+ * ⚠ SIGKILL / SIGSTOP は捕捉できないので除く。
+ * ⚠ sigaction の問い合わせが EINVAL になるもの (glibc の SIGCANCEL=32 / SIGSETXID=33 ・
+ *   NPTL が使う) は continue で自然に外れる。この continue は load-bearing。 */
+static void
+ts2_spawn_sigdefault(sigset_t * out)
+{
+int sg;
+	sigemptyset(out);
+	for ( sg = 1 ; sg < NSIG ; sg ++ ) {
+	struct sigaction cur;
+		if ( sg == SIGKILL || sg == SIGSTOP )
+			continue;
+		if ( sigaction(sg,NULL,&cur) < 0 )
+			continue;
+		if ( cur.sa_handler == SIG_IGN || cur.sa_handler == SIG_DFL )
+			continue;
+		sigaddset(out,sg);
+	}
+}
+
+/* posix_spawn で子を起こす。従来の子がやっていたことを file_actions / attr へ移したもの。
+ *
+ * @param argv  `#` 接頭辞のときの argv (argv[0] が実行するもの)。0 なら `sh -c command`
+ * @param errp  posix_spawn の戻り値 (0 以外 = 失敗)。★ errno ではなく**返り値**で返る
+ * @return 子の pid ・ 失敗なら -1
+ */
+static pid_t
+ts2_spawn_exec(const char * command,const char ** argv,
+		int fd0,int fd1,int fd2,int * errp)
+{
+posix_spawn_file_actions_t	fa;
+posix_spawnattr_t		at;
+sigset_t			sigdfl,  sigempty;
+pid_t				cpid = -1;
+int				rc;
+char				*sh_argv[4];
+
+	ts2_spawn_sigdefault(&sigdfl);
+	sigemptyset(&sigempty);		/* 従来の子も mask を空にしていた */
+
+	posix_spawn_file_actions_init(&fa);
+	posix_spawnattr_init(&at);
+	posix_spawnattr_setsigdefault(&at,&sigdfl);
+	posix_spawnattr_setsigmask(&at,&sigempty);
+	posix_spawnattr_setpgroup(&at,0);		/* setpgid(0,0) 相当。
+							 * kill(-pgid) が孫まで届くため */
+	posix_spawnattr_setflags(&at,
+		POSIX_SPAWN_SETSIGDEF|POSIX_SPAWN_SETSIGMASK|POSIX_SPAWN_SETPGROUP);
+
+	/* ⚠⚠ file_actions は **登録した順に実行される**。dup2 を全部先に済ませてから
+	 * 3 番以降を畳む。逆に置くと、dup2 で 3 番に来た fd を自分で閉じて子が起動しない
+	 * (bench が測定中に実際に踏んだ。症状は「子が何も書かないまま終わる」)。 */
+	posix_spawn_file_actions_adddup2(&fa,fd0,0);
+	posix_spawn_file_actions_adddup2(&fa,fd1,1);
+	posix_spawn_file_actions_adddup2(&fa,fd2,2);
+#if defined(TS2_SPAWN_CLOSEFROM)
+	/* close_range(3,~0U) 相当。これが無い環境では spawn 経路に入らない (上の gate)。 */
+	posix_spawn_file_actions_addclosefrom_np(&fa,3);
+#endif
+
+	if ( argv ) {
+		rc = posix_spawnp(&cpid,argv[0],&fa,&at,
+				(char *const *)argv,environ);
+	}
+	else {
+		sh_argv[0] = (char *)"sh";
+		sh_argv[1] = (char *)"-c";
+		sh_argv[2] = (char *)command;
+		sh_argv[3] = (char *)0;
+		rc = posix_spawnp(&cpid,"sh",&fa,&at,sh_argv,environ);
+	}
+	posix_spawn_file_actions_destroy(&fa);
+	posix_spawnattr_destroy(&at);
+
+	*errp = rc;
+	if ( rc != 0 )
+		return -1;
+	return cpid;
+}
+#endif	/* TS2_HAVE_SPAWN */
 
 #include	"_ts2/c++/ts2System_.h"
 #include	"ts2/c++/stdInterval.h"
@@ -128,6 +264,7 @@ public:
 	 * @param wfd
 	 *   子の **stdin** (親から見て書く側) を受け取る `sPtr<ts2IO>` へのポインタ。<br>
 	 *   `nullptr` を渡すとパイプの書き込み端を即 close する (子の stdin は EOF になる)。<br>
+	 *   ⚠ **`efd` も `nullptr` だと `DM_TTY` が自動で立つ** (上の `dmode` の項を見ること)。<br>
 	 *   / Pointer to receive child **stdin** (parent-writable) as `sPtr<ts2IO>`.
 	 *   `nullptr` → write end closed immediately (child gets EOF on stdin).
 	 *
@@ -137,6 +274,12 @@ public:
 	 *   - `DM_CONT_TERM` (1): `destroy()` 時に SIGTERM を送り 1 秒ごとに再送し続ける。<br>
 	 *   - `DM_CONT_KILL` (3): `destroy()` 時に SIGKILL を送り 1 秒ごとに再送し続ける。<br>
 	 *   - `DM_TTY` (0x100): 子の stdio を PTY で接続する (端末エミュレータ向け)。<br>
+	 *     ⚠ **`wfd` と `efd` の両方に `nullptr` を渡すと、このフラグが自動で立つ**
+	 *     (`newProcess()` の `if ( wfd == 0 && efd == 0 ) dmode |= DM_TTY;`)。
+	 *     「stdout だけ受け取れればよい」つもりで 2 つ省くと**意図せず PTY 接続**になり、
+	 *     3 本のパイプが同じ master/slave を指す形に変わる (posix_spawn 経路も
+	 *     DM_TTY は対象外なので fork に落ちる)。PTY が要らないなら
+	 *     **`wfd` か `efd` のどちらか一方は受け取ること**。<br>
 	 *   - `DM_APPLY` (0x200): 呼び出し元が fd を事前に用意して渡す (高度な用途)。<br>
 	 *   kill は常にプロセスグループ全体 (`kill(-pgid, SIG)`) を対象にするので、
 	 *   `sh -c` 経由の孫プロセスにも**届く**。ただし終了までは保証しない
@@ -482,6 +625,62 @@ sPtr<stdArray<sPtr<stdString> > > args;	/* MUST stay in scope until exec: args_c
 	}
 
         /* Invoke processs */
+
+#if defined(TS2_HAVE_SPAWN)
+	/* ★★★ posix_spawn 経路。fork の COW 複製と exec の解体を丸ごと避ける。
+	 *
+	 * ⚠ **DM_TTY / DM_APPLY はここを通さない。** あちらは呼び手が持ち込んだ fd が
+	 *   混ざり (DM_APPLY では **-1 もありうる**)、`adddup2(-1,0)` は posix_spawn では
+	 *   エラーになる。従来の `dup2(-1,0)` は EBADF を黙って無視していたので、同じ
+	 *   「黙って無視」に相当するものが file_actions には無い。また DM_TTY は 3 本の
+	 *   パイプが同じ master/slave を指すので、閉じ方も別になる。
+	 *   ⇒ この 2 つは従来の fork に落とす。子プロセスの起動 (dmode=0) はここを通る。
+	 * ★ ここに来る時点で 3 本のパイプは**すべて別の fd** なので、失敗時に 6 本とも
+	 *   閉じてよい (fork 側の失敗分岐が DM_TTY を場合分けしているのはその事情)。 */
+	if ( ts2_use_spawn() && !(dmode & (DM_TTY|DM_APPLY)) ) {
+	int	rc = 0;
+		pid = ts2_spawn_exec(command,
+				(command[0] == '#') ? &args_ptr[0] : 0,
+				pipe_p2c[R],pipe_c2p[W],pipe_err[W],&rc);
+		if ( pid < 0 ) {
+			/* ★★ 失敗したら **従来の fork 経路へ落ちる** (return しない)。
+			 *
+			 * posix_spawn は errno ではなく返り値で失敗を返し、しかも
+			 * **exec の失敗までここで分かる** (glibc は子の errno をパイプで
+			 * 受け取り、子を自分で waitpid してから返す ⇒ zombie も残らない)。
+			 * ここで -4 を返すと**意味が変わる**: 従来は「`#存在しないコマンド`」でも
+			 * fork は成功し、子が `_Exit(1)` して親に **TSE_RETURN (status = exit 1)**
+			 * が届いていた。-4 を返すと `ret < 0` で ACT_FINISH が FIN_START へ直行し、
+			 * **TSE_RETURN が一度も届かない** ⇒ それだけを待っている呼び手は
+			 * 永久に待つ。性能のための変更で意味を変えてはいけない。
+			 *
+			 * ⇒ 落ちれば fork 経路が同じ失敗を同じ形 (exit 1) で再現する。
+			 * 余分な代償は失敗時の spawn 1 回分だけで、そこは稀な経路。
+			 * ENOSYS / EINVAL のような「この機では spawn が使えない」も同じ網で拾える。
+			 *
+			 * ⚠ fd はまだ 1 本も閉じていないので、そのまま fork 経路に渡せる。 */
+			(void)rc;
+		}
+		else {
+		/* ★ シグナルを止める必要が無い。fork 側が `pthread_sigmask(SIG_BLOCK)` で
+		 * 窓を消しているのは「子が親のコピーとして親のハンドラを持つ区間」がある
+		 * からで、posix_spawn にはその区間そのものが無い (ハンドラの既定化と mask は
+		 * attr でカーネル側に渡してある)。signal の窓はここでは構造的に生じない。 */
+		setpgid(pid,pid);	/* race guard: 親も kill の前に setpgid する
+					 * (attr の SETPGROUP と二重だが、どちらが先でも
+					 *  同じ pgid になる。既に exec 済みなら EACCES で
+					 *  失敗するだけ) */
+		soCLOSE(pipe_p2c[R]);
+		soCLOSE(pipe_c2p[W]);
+		soCLOSE(pipe_err[W]);
+		*fd_w   = pipe_p2c[W];
+		*fd_r   = pipe_c2p[R];
+		*fd_err = pipe_err[R];
+		return pid;
+		}
+	}
+#endif	/* TS2_HAVE_SPAWN */
+
 	/* ★ fork の **前に** シグナルを止める。子側で戻すだけでは、fork が子で返ってから
 	 * 下のリセットの 1 命令目までがまだ親のハンドラで、窓が残る (狭いだけ)。
 	 * ここで止めておくと、その区間は **配送そのものが起こり得ない** —
@@ -542,7 +741,22 @@ sPtr<stdArray<sPtr<stdString> > > args;	/* MUST stay in scope until exec: args_c
 			sigemptyset(&unblock_all);
 			sigprocmask(SIG_SETMASK,&unblock_all,NULL);
 		}
-		signal(SIGPIPE,signal_handler_empty);
+		/* ★ ここに在った `signal(SIGPIPE,signal_handler_empty)` を外した。
+		 *
+		 * 2 つの理由で**間違い**だった:
+		 *   ① exec で捕捉ハンドラは全部 SIG_DFL に戻るので、**exec 後には残らない**。
+		 *      exec する子に対しては最初から何もしていなかった。
+		 *   ② 親が SIGPIPE を **SIG_IGN** にしていた場合、この行がそれを**ハンドラに
+		 *      書き換えてしまい**、exec で SIG_DFL になる。上のループが
+		 *      「SIG_IGN は exec を越えて継承されるので触らない」とわざわざ避けている
+		 *      のに、その直後に踏み潰していた。(tsSignalCore が FIN_START で
+		 *      無条件に SIG_DFL を入れてアプリのハンドラを消していた) と同型。
+		 *
+		 * ⚠ tinyState アプリ自身は SIGPIPE を SIG_IGN にしてはいけない
+		 *   (`destroy()` が THR_KILL(SIGPIPE) を送るため・no-op ハンドラを使う約束)
+		 *   ので、② が実際に効くのは **非 tinyState の呼び手**のときだけ。
+		 * ★ fork 経路と spawn 経路の挙動を揃える意味もある (揃っていないと A/B が
+		 *   「fork と spawn の差」でなくなる)。 */
 		if ( dmode & DM_TTY ) {
 	                ::close(pipe_p2c[W]);
 	                ::dup2(pipe_p2c[R],0);

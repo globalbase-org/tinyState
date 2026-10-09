@@ -1,0 +1,58 @@
+/* revision.h.in */
+
+/**
+ * @file tinyState_revision.h
+ * @brief The one generated header that carries the git revision, kept apart
+ *        from @ref tinyState_config.h on purpose. /
+ *        git リビジョンだけを載せる生成ヘッダ。`tinyState_config.h` から
+ *        **意図的に切り離してある**。
+ *
+ * @details
+ * なぜ別ファイルなのか: この中身は **コミットごとに変わる**。`tinyState_config.h`
+ * は `std2/includes.h` 経由で **全 TU が引く**ので、そこに版の文字列を置くと
+ * install するたびに (内容が 1 行しか違わなくても) **mtime で下流の全 TU が
+ * 焼き直る**。利用側の実測で **884 TU ・ Linux で約 6.5 分** ・ Windows (MSYS2) では
+ * **建て直し約 60 分 + フル検定約 42 分**。版を 1 行直すだけの install でも同じだけ
+ * かかっていた。
+ *
+ * @note TU 数は**利用側の構成で変わる**。同じ相手でも別構成では 662 TU ・ 約 4 分だった。
+ *       効くのは桁 (数百 TU) であって、特定の数ではない。
+ *
+ * ⇒ このヘッダは **tinyState 自身の 1 つの TU しか引かない**。
+ *   版が要るだけなら、まず引かずに済む手を選ぶこと:
+ *
+ * | 欲しいもの | 手段 | 焼き直し |
+ * |---|---|---|
+ * | 実行中のプロセスの版 | @ref ts2_revision() (`ts2/c++/ts2Revision.h`) | なし |
+ * | 入っている物の版 | `nm`/`strings` で **消費側の実行体か .so** を見る | なし |
+ * | configure 時の版 | `tinyState_REVISION` (`tinyStateConfig.cmake`) | 再 configure のみ |
+ * | **コンパイル時定数**として | `#include "std2/tinyState_revision.h"` → @ref TS_REVISION | **引いた TU だけ** |
+ *
+ * @note `strings` で版を探すときは **.a ではなく消費側**を見ること。静的ライブラリでは
+ *       参照されない .o がリンカに落とされるので、「.a に在る」は「exe に入った」を
+ *       意味しない。逆に消費側の実行体が薄い場合、文字列は中間の .so 側に入る。
+ */
+
+#ifndef ___tinyState_revision_H___
+#define ___tinyState_revision_H___
+
+/**
+ * @def TS_REVISION
+ * @brief git provenance string, captured at CMake *configure* time. /
+ *        CMake configure 時点で取得する git 由来リビジョン文字列。
+ * @details `git describe --tags --always --dirty --long` — nearest tag,
+ *          commits-since, short hash, and a `-dirty` suffix if the working tree
+ *          has uncommitted changes (e.g. `v2.0.0-3-gabc1234`).  Degrades to
+ *          `"unknown"` outside a git checkout (release tarball).  The snapshot
+ *          is taken at configure, so commits made after `cmake -B build .` are
+ *          not reflected until the next configure. /
+ *          git 管理外では `"unknown"`。configure 時のスナップショットのため
+ *          再 configure まで最新コミットは反映されない。
+ * @note `-dirty` が付いた版は **自分を名乗れない**: 同じ文字列で中身が違う物が
+ *       作れてしまう。実例として `rc18-7-ge302040-dirty` を名乗る木の中身が
+ *       11 コミット先の物と同等だった件がある (別の prefix と取り違えると
+ *       対照の「入り」「無し」が逆になる)。
+ */
+#define TS_REVISION       "@TS_REVISION@"
+
+#endif	/* ___tinyState_revision_H___ */

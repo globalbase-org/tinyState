@@ -52,6 +52,7 @@ set(TS2_SOURCES
 
 set(TS2_ARCH_SOURCES
   classes/ts2/c++/tsSignalCore.cpp
+  classes/ts2/c++/sThreadStack.cpp
   classes/ts2/c++/fwIOarch.cpp
   classes/ts2/c++/ts2IOdescriptor.cpp
   classes/ts2/c++/ts2IOsocket.cpp
@@ -97,6 +98,13 @@ endif()
 # パッケージの imported target に載せているものと同じ内容を、ビルドツリーの
 # ターゲットにも宣言する。これが無いと in-tree の SHARED ビルドや whole-archive
 # リンクで winsock 等が引けない (STATIC ではリンクが起きないので露見しない)。
+# main スレッドのスタックを 8MB に。PE の SizeOfStackReserve はリンク時に
+# しか決められない。PUBLIC なので、このツリー内でリンクする実行体 (test / example) にも
+# 伝播する。install 済みパッケージ側の同じ指定は cmake/tinyStateConfig.cmake.in。
+if(WIN32 OR CYGWIN)
+  target_link_options(tinyState2 PUBLIC "-Wl,--stack,0x800000")
+endif()
+
 if(WIN32 AND NOT CYGWIN)
   target_link_libraries(tinyState2 PUBLIC ws2_32 mswsock bcrypt)
 else()

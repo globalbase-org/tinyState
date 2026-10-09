@@ -188,6 +188,7 @@ protected:
 	ts2io_ring *	rbuf;
 	ts2io_ring *	wbuf;
 	int		io_ref;		/* ts2IOwinConsole-only: 1 while its readiness wait holds a keep-alive refio (base/socket use the op-tied refio instead) */
+	int		tpio_failed;	/* 1 once we have explained a CreateThreadpoolIo failure: say it, but say it once */
 	sPtr<stdQueue<tinyState> >	read_waiters;
 	sPtr<stdQueue<tinyState> >	write_waiters;
 	int		ensure_tpio();
@@ -215,6 +216,7 @@ ts2IOdescriptor_::ts2IOdescriptor_(
 	closing = 0;
 	rbuf = wbuf = NULL;
 	io_ref = 0;
+	tpio_failed = 0;
 }
 
 void
@@ -233,6 +235,7 @@ ts2IOdescriptor_::ts2IOdescriptor_(
 	closing = 0;
 	rbuf = wbuf = NULL;
 	io_ref = 0;
+	tpio_failed = 0;
 }
 
 void
@@ -252,7 +255,39 @@ ts2IOdescriptor_::ensure_tpio()
 	if ( fd == INVALID_HANDLE_VALUE )
 		return -1;
 	tpio = CreateThreadpoolIo(fd, io_cb, this, NULL);
-	return tpio ? 0 : -1;
+	if ( tpio )
+		return 0;
+	/* CreateThreadpoolIo only accepts a handle that was opened for overlapped
+	   I/O; on a synchronous one it fails with ERROR_INVALID_PARAMETER and there
+	   is nothing to retry.  Everything below (read/write through the ring) is
+	   built on threadpool completions, so this descriptor can never carry data.
+	   Say so once, because the failure is otherwise indistinguishable from an
+	   ordinary read error and the caller has no way to guess the reason: the
+	   usual way to get here is a std stream inherited from a parent that is not
+	   ts2System -- a shell pipe -- which Windows creates synchronous. */
+	if ( ! tpio_failed ) {
+	DWORD le = GetLastError();
+		/* Once per descriptor, because each HANDLE is its own problem -- a
+		   process whose stdin and stdout are both synchronous has two of them.
+		   The explanation is process-wide though: printing the same paragraph
+		   per stream buries the part that differs, so only the first one
+		   carries it and the rest name their handle. */
+	static int explained;
+		tpio_failed = 1;
+		if ( ! explained ) {
+			explained = 1;
+			::printf("ts2IOdescriptor: HANDLE %p cannot do overlapped I/O"
+				" (CreateThreadpoolIo failed, Win32 error %lu) — the MinGW"
+				" backend moves data through the OS thread pool, which needs"
+				" a handle opened FILE_FLAG_OVERLAPPED. A std stream"
+				" inherited from a non-tinyState parent (a shell pipe) is"
+				" synchronous and cannot be used this way; read()/write() on"
+				" it fail with ENOTSUP.\n",(void*)fd,(unsigned long)le);
+		}
+		else	::printf("ts2IOdescriptor: HANDLE %p cannot do overlapped I/O"
+				" either (Win32 error %lu)\n",(void*)fd,(unsigned long)le);
+	}
+	return -1;
 }
 
 
@@ -266,7 +301,9 @@ ts2IOdescriptor_::read(void * buf,int length)
 	if ( C_TEST(tinyState_::state(),C_ZOM|C_FIN) ) { err = EBADF; return -1; }
 	if ( ! rbuf ) rbuf = new ts2io_ring();
 	if ( rbuf->alloc(TS2IO_RING_CAP) < 0 ) { err = ENOMEM; return -1; }
-	if ( ensure_tpio() < 0 ) { err = (int)GetLastError(); state = TS2IO_ERROR; return -1; }
+	/* errno, not a Win32 code: `err` is what the portable callers read.  The
+	   Win32 detail is already in the one-off diagnostic ensure_tpio() prints. */
+	if ( ensure_tpio() < 0 ) { err = ENOTSUP; state = TS2IO_ERROR; return -1; }
 	{
 	DWORD n = rbuf->copy_out(buf,(DWORD)length);
 		if ( n > 0 ) { wakeup(); return (int)n; }	/* partial-immediate, self-contained */
@@ -288,7 +325,9 @@ ts2IOdescriptor_::write(void * buf,int length)
 	if ( C_TEST(tinyState_::state(),C_ZOM|C_FIN) ) { err = EBADF; return -1; }
 	if ( ! wbuf ) wbuf = new ts2io_ring();
 	if ( wbuf->alloc(TS2IO_RING_CAP) < 0 ) { err = ENOMEM; return -1; }
-	if ( ensure_tpio() < 0 ) { err = (int)GetLastError(); state = TS2IO_ERROR; return -1; }
+	/* errno, not a Win32 code: `err` is what the portable callers read.  The
+	   Win32 detail is already in the one-off diagnostic ensure_tpio() prints. */
+	if ( ensure_tpio() < 0 ) { err = ENOTSUP; state = TS2IO_ERROR; return -1; }
 	if ( wbuf->error() ) { err = wbuf->error(); state = TS2IO_ERROR; return -1; }
 	{
 	DWORD n = wbuf->copy_in(buf,(DWORD)length);

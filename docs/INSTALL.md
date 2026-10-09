@@ -27,7 +27,8 @@ Linux と、Windows の 2 つのツールチェーン（**Cygwin** / **MSYS2 (Mi
 | 場所 | 内容 |
 |---|---|
 | `include/` | 共通ヘッダ + OS 依存ヘッダ(arch overlay) + 生成ヘッダ `_ts2/` |
-| `include/std2/tinyState_config.h` | ビルド構成ヘッダ（`TS_VERSION` / `TS_REVISION` 等。→ [BUILD_INTERNAL §8](BUILD_INTERNAL.md)） |
+| `include/std2/tinyState_config.h` | ビルド構成ヘッダ（`TS_VERSION` / `HAVE_*` 等。**版は入っていない** → §4-1） |
+| `include/std2/tinyState_revision.h` | 版の文字列 `TS_REVISION` だけを載せる生成ヘッダ（→ §4-1） |
 | `lib/libtinyState2.a`, `libtinyState2Math.a` | 静的ライブラリ（`TINYSTATE_BUILD_SHARED=ON` なら代わりに `.so` / `.dylib` / `.dll`。→ [§5-1](#5-1-ビルドオプション)） |
 | `bin/tscpp2` ほか | コードジェネレータ (Perl) |
 | `lib/cmake/tinyState/` | `find_package(tinyState)` 用パッケージ設定（版数ファイル込みで `find_package(tinyState 2.0)` の版数指定も可） |
@@ -180,20 +181,47 @@ cmake --build example/socktest/build
 ## 4-1. インストール済みの版を確認する
 
 `cmake` の `PACKAGE_VERSION` は `project(VERSION)` 由来で、リリース候補をまたいでも
-`2.0.0` のまま動かない。**どのビルドが入っているか**は `TS_REVISION` で見る。
+`2.0.0` のまま動かない。**どのビルドが入っているか**は版の文字列で見る。
+
+手段は 3 つある。**聞きたいものが違う**ので使い分ける:
+
+| 聞きたいこと | 手段 | 下流の焼き直し |
+|---|---|---|
+| **いま動いているのは何か** | `ts2_revision()` (実行時) / `strings`・`nm` でバイナリを見る | なし |
+| configure 時に何に対して建てたか | `tinyState_REVISION` (`find_package` の後) | 再 configure のみ |
+| コンパイル時定数として埋めたい | `#include "std2/tinyState_revision.h"` → `TS_REVISION` | **引いた TU だけ** |
 
 ```sh
-grep TS_REVISION /usr/local/include/std2/tinyState_config.h
-#   #define TS_REVISION       "v2.0.0-rc15-0-g1a2b3c4"
+# ① 入っている物の版 (実行せずに ・ 消費側のバイナリから)
+strings /path/to/myapp | grep -m1 'tinyState v'
+#   tinyState v2.0.0-rc15-0-g1a2b3c4
+nm -C --defined-only /path/to/libmyapp.so | grep ts2_revision
+
+# ② install されている物の版 (ファイルを 1 つ grep するだけ)
+grep tinyState_REVISION /usr/local/lib/cmake/tinyState/tinyStateConfig.cmake
+#   set(tinyState_REVISION "v2.0.0-rc15-0-g1a2b3c4")
 ```
 
-C++ からは `#include "std2/tinyState_config.h"` で `TS_REVISION` / `TS_VERSION` を参照でき、
-CMake からは `find_package` の後に同じ値が引ける:
+```cpp
+#include "ts2/c++/ts2Revision.h"
+::printf("running on tinyState %s\n",ts2_revision());
+```
 
 ```cmake
 find_package(tinyState REQUIRED)
 message(STATUS "built against tinyState ${tinyState_REVISION}")
 ```
+
+> ★ **`std2/tinyState_config.h` には版は入っていない。** そこは `std2/includes.h` 経由で
+> **全 TU が引く**ヘッダなので、コミットごとに変わる文字列を置くと install するたびに
+> **mtime だけで下流の全 TU が焼き直る** (利用側の実測で 884 TU ・ Linux 約 6.5 分 ・
+> Windows (MSYS2) は建て直し約 60 分 + 検定約 42 分)。版を 1 行直すだけの install でも
+> 同じだけかかっていたので、版は `std2/tinyState_revision.h` へ分けた。
+>
+> ★ **`.a` を `strings` で見てはいけない。** 静的ライブラリでは参照されない `.o` が
+> リンカに落ちるので「`.a` に在る」は「exe に入った」を意味しない。逆に消費側の実行体が
+> 薄い (実体が中間の `.so` に在る) 場合、文字列はその `.so` 側に入る。**持ち主の側**を
+> 1 本当ててから「無い」と言うこと。
 
 > `TS_REVISION` は **configure 時に確定する**。既存の build ディレクトリを使い回して
 > `make` / `install` し直しても文字列は更新されないので、版を揃えたいときは

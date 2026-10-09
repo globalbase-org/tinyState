@@ -4,6 +4,7 @@
 #include	"ts2/c++/co_tsThreadKill.h"
 #include	"ts2/c++/stdInterval.h"
 #include	"ts2/c++/tsProbe.h"	/* 撤収プローブ: 撤収中に積みに来た相手を記録する */
+#include	"ts2/c++/sThreadStack.h"	/* worker のスタックを揃える */
 
 #define THREAD_TOLL_DULATION		(10*1000*1000)
 #define THREAD_UP_DULATION		(10*1000)
@@ -551,6 +552,13 @@ int i;
 	for ( ; i ; i -- ) {
 		pthread_attr_init(&phy_attr);
 		pthread_attr_setdetachstate(&phy_attr,PTHREAD_CREATE_DETACHED);
+		/* worker のスタックを明示する。既定のままだと機ごとにばらつき、
+		 * macOS だけ 519KB (main の 1/16) で、eventHandler の入れ子を許せる段数が
+		 * そこだけ桁違いに浅くなる。失敗しても既定のスタックで作られるだけで、
+		 * 深さの閾値は スレッド自身に聞いて決まるので安全側に落ちる。
+		 * ★ 効いたことの確認は戻り値ではなく、worker 自身が
+		 * ts2_thread_stack_size() で答える値で行う。 */
+		pthread_attr_setstacksize(&phy_attr,(size_t)ts2_worker_stack_size());
 		__sync_fetch_and_add(&tsThreadLiveWorkers,1);	/* spawn 前に +1(存在するのに未カウントの窓を作らない) */
 		pthread_create(&phy_thread,&phy_attr,__tsThread_body,(void*)this);
 		pthread_attr_destroy(&phy_attr);

@@ -6,6 +6,7 @@
 #include	"ts2/c++/tinyState.h"
 #include	"ts2/c++/sThreadMutex.h"
 #include	"ts2/c++/sImmortal.h"
+#include	<atomic>
 
 /**
  * @brief 時刻取得とタイマー待ち機能を提供するユーティリティクラス。/ Utility providing current time and timer-wait for tinyState.
@@ -25,12 +26,14 @@ public:
 	/** @brief me に登録済みのタイマーを解除する。/ Cancel any timer registered for me. */
 	static int detach(sPtr<tinyState>  obj);
 	/** @brief stdFrameWork 経由でフォーマット出力する。/ Formatted output via stdFrameWork. */
-	/** @brief 現在時刻 (マイクロ秒、単調増加)。/ Current time in microseconds (monotonically increasing). */
+	/** @brief 現在時刻 (マイクロ秒、単調増加)。ロックを取らない (CAS)。
+	 *  / Current time in microseconds (monotonically increasing); lock-free (CAS). */
 	static INTEGER64 now();
 
  protected:
-	static sImmortal<sThreadMutex>	m;
-	static INTEGER64	lastAccessTime;
+	/* now() が返した最大値。単調性はこの atomic への CAS だけで担保しており、
+	 * ロックは取らない (経緯と実測は now() の実装側コメント)。 */
+	static std::atomic<INTEGER64>	lastAccessTime;
 };
 
 

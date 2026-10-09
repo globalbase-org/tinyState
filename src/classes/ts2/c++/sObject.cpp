@@ -509,6 +509,17 @@ sObject::refLock() {
 int er;
 pthread_t tid;
 
+	/* ★ この遅延初期化に同期が無いのは見落としではなく、**README の契約による**。
+	 * 利用側が `pthread_create` / `join` を直接呼ぶことは禁じられており、スレッドは
+	 * `TS_THREAD` 状態としてのみ生える。tinyState 自身の起動は単スレッドなので、
+	 * **最初の refLock() は必ずスレッドが 1 本しか無い時点で走る** —
+	 * だから二重 init も、フラグだけ見えて mutex の中身が見えない窓も成立しない。
+	 *
+	 * ⚠ 契約が破られた場合 (利用側が最初の refLock() より前に自分のスレッドを起こす)
+	 *   には成立しない。そのときは `pthread_once` へ寄せること。足すならバリアごと
+	 *   必要で、フラグだけ atomic にしても足りない — `refMutex_init` は素の `uint8_t`
+	 *   で、ここが公開しているのは **mutex そのもの**だからである
+	 *   (フラグが見えても中身が見えていない、という形で壊れる)。 */
 	if ( refMutex_init == 0 ) {
 	pthread_mutexattr_t attr;
 	int recursive;

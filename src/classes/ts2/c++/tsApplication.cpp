@@ -5,6 +5,8 @@
 #include	"ts2/c++/tsThread.h"
 #include	"ts2/c++/sThreadMutexHandleRelease.h"
 
+#include	<cstdlib>
+
 /* tsThread.cpp 定義: 生存 worker pthread 数。shutdown で全 worker の tail relref 完了(=0)を
  * 待ってから静的破棄へ進むために参照する(detached worker vs 静的 refMtx 破棄の競合防止)。 */
 extern volatile int tsThreadLiveWorkers;
@@ -79,6 +81,45 @@ public:
 	/** @brief 再起動フラグ。アプリケーション全体の再起動を要求する。/ Restart flag to request a full application restart. */
 	uint8_t		restart_flag;
 
+	/**
+	 * @brief `eventHandler()` の入れ子をこの段数まで許す。**0 = 機ごとに自動** (既定)。
+	 *        / Cap on eventHandler() nesting; 0 (default) means "decide per machine".
+	 * @details
+	 * `eventHandler()` は入れ子に呼ばれる (親への `TSE_RETURN`・listener 通知など)。
+	 * `state_lock` は**同一オブジェクトの再入**しか止めないので A→B→C の連鎖は
+	 * 無制限に深くなれ、放っておくとスタックを食い尽くして**何のメッセージも出さずに**
+	 * SIGSEGV で死ぬ (実測 1 段 656 バイト・Linux の 8MB で約 12,800 段)。<br>
+	 * <br>
+	 * 上限を超えた入場は、イベントごと `gc` のキューへ回される (`gc->exe(obj,ev)`)。
+	 * gc 経由の再投入は深さ 1 から始まるので、長い連鎖は「上限 × gc 往復」に分割されて
+	 * 前進する。<br>
+	 * <br>
+	 * **0 のまま (既定) なら、スレッドごとに実スタック長を OS に聞いて**
+	 * `min( 1500, 実スタック / 4KB )` を使う。スタックの小さい機では勝手に下がるだけで、
+	 * 沈黙死にはならない。明示した値はそちらが勝つ (全スレッド共通)。<br>
+	 * <br>
+	 * ★ **`INI` 段は逃がさない**: `TS_STATE(INI_START)` が `thNEW` の中で走り切ること
+	 * が仕様なので (COOKBOOK §10)、構築の連鎖はこの安全網の対象外。<br>
+	 * ★ **順序は保証されない**: 遅延された `ev` が gc キューに並ぶ一方、後から来た
+	 * 別イベントは直接そのオブジェクトのキューに入るので、先に処理され得る。
+	 * `onlyOneEvent` の併合も、逃がしが `_insEvent()` の**前**で分岐するぶん効かない
+	 * (配送時に改めて併合されるので、1 回で済んだ状態関数が 2 回走り得る)。<br>
+	 * ★ 自分のアプリが上限に届いているかは `TS2_EVH_PROBE` を設定すれば測れる
+	 * (逃がし 1 件ごとに stderr へ 1 行) → `tsProbeEvhEscapeCount()`。<br>
+	 * ★ 撤収中など `gc` が既に無いときは、逃がし先が無いので**従来どおり再帰する**
+	 * (落とすことはしない)。<br>
+	 * <br>
+	 * 読み書きともできる。小さい値 (例 `4`) を入れるとこの機構の陽性対照になる。<br>
+	 * ★ **小さすぎる値は `tsGC` が `panic` で突き返す** (「返した仕事がまた逃がされる
+	 * だけで 1 段も進まない」設定を、黙って空転させずに知らせる)。閾値は定数ではなく
+	 * **その場で測った gc の配送深さ**で、実測ではいま深さ 2 = `3` 以上なら通る。<br>
+	 * ★ 足りないときに**繰り上げはしない** — この値はスタックの実力から来ているので、
+	 * 下駄を履かせたらそれを表さなくなる。再考するのはアプリ側。<br>
+	 * ★ 環境変数 **`TS2_EVH_DEPTH`** でも入れられる (アプリを 1 行も直さずに陽性対照を
+	 * 取るための口。アプリが自分で代入すればそちらが勝つ)。
+	 */
+	int		evh_depth;
+
 	/** @brief アプリケーション共通の再帰的 mutex。TS_STATE の app-mutex として使用される。/ Recursive mutex shared across all tinyStates in this application (the "app-mutex"). */
   	sThreadMutexRecursive mtx;
 private:
@@ -109,6 +150,20 @@ tsApplication_::tsApplication_ (
 	tinyState_(parent)
 {
 	this->initial_lambda = initial_lambda;
+	/* 0 = 「スレッドごとに OS に聞いて決める」。既定値を operator new の memset に
+	 * 頼らず明示する (COOKBOOK §10 と同じ理由)。この member は 0 が有効値なので
+	 * 事故にはならないが、意図を読めるようにしておく。 */
+	this->evh_depth = 0;
+	/* env からも入れられるようにしてある。狙いは **アプリを 1 行も直さずに
+	 * 陽性対照を取れること**: 極小の値を入れると逃がしが常時起きるので、
+	 * 「順序が入れ替わってもこのアプリは壊れないか」を既存の試験のまま検定できる。
+	 * 凍結中のツリーや他プロジェクトのアプリに当てるのはこの口しか無い。
+	 * アプリが自分で代入すれば、そちらが後から上書きする (明示が最も強い)。 */
+	{
+	const char * v = ::getenv("TS2_EVH_DEPTH");
+		if ( v && *v )
+			this->evh_depth = (int)::strtol(v,0,0);
+	}
 }
 
 

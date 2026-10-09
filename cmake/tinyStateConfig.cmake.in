@@ -100,6 +100,15 @@ macro(_tinystate_set_common _tgt _shared)
   set_target_properties(${_tgt} PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${TINYSTATE_PREFIX}/include;${TINYSTATE_PREFIX}/include/std2"
     INTERFACE_COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++2a>;$<$<COMPILE_LANGUAGE:CXX>:-frtti>;$<$<COMPILE_LANGUAGE:CXX>:-D__EXTENSIONS__>")
+  if(WIN32 OR CYGWIN)
+    # main スレッドのスタックは PE の SizeOfStackReserve で決まり、それを決められる
+    # のは**リンク時だけ**。既定の 2MB だと eventHandler の入れ子を 507 段しか許せない
+    # ので 8MB にする。MinGW と Cygwin はどちらも PE なので同じ指定が効く。
+    # POSIX の main では同じことができない (exec 時の RLIMIT_STACK がカーネルの決定で、
+    # -z stacksize は ld が無視する)。足りない場合は深さの閾値が勝手に下がるだけ。
+    set_property(TARGET ${_tgt} PROPERTY
+      INTERFACE_LINK_OPTIONS "-Wl,--stack,0x800000")
+  endif()
   if(WIN32)
     # MinGW native PE (MSYS2) or MinGW cross.  CYGWIN is *not* WIN32, so it
     # falls through to the POSIX branch below.
@@ -108,7 +117,7 @@ macro(_tinystate_set_common _tgt _shared)
     if(NOT ${_shared})
       # 静的版のみ: ランタイムを実行体へ静的に取り込む。DLL 版に付けると
       # DLL 側が使うランタイムと二重になるので付けない。
-      set_property(TARGET ${_tgt} PROPERTY
+      set_property(TARGET ${_tgt} APPEND PROPERTY
         INTERFACE_LINK_OPTIONS "-static;-static-libgcc;-static-libstdc++")
     endif()
   else()

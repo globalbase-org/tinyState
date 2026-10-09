@@ -19,8 +19,9 @@ public:
 		:
 		mtx(_mtx)
 	{
-		if ( mtx.lock() < 0 )
-			sObject::panic("LOCK mutex handleRelease error");
+		/* ★ 失敗は *正の errno* で来る。`< 0` では永久に発火しない。 */
+		if ( mtx.lock() != 0 )
+			sObject::panic("LOCK mutex handle error");
 	}
 	sThreadMutexHandle(const sThreadMutexHandle & hdr) 
 		:
@@ -29,7 +30,10 @@ public:
 		sObject::panic("mutex handle's copy is not permitted");
 	}
 	~sThreadMutexHandle() {
-		mtx.unlock();
+		/* ★ 戻り値を捨てていた。持ち主でないスレッドの unlock は EPERM で
+		 * 失敗するが、黙って通ると「解放したつもり」で先へ進む。 */
+		if ( mtx.unlock() != 0 )
+			sObject::panic("UNLOCK mutex handle error (not the owner?)");
 	}
 	void operator =(sThreadMutex & _mtx) {
 		mtx.unlock();

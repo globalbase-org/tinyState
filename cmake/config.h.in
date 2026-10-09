@@ -25,20 +25,17 @@
 #define TS_VERSION_MINOR  @tinyState_VERSION_MINOR@
 /** @brief Patch component of @ref TS_VERSION (integer). */
 #define TS_VERSION_PATCH  @tinyState_VERSION_PATCH@
-/**
- * @def TS_REVISION
- * @brief git provenance string, captured at CMake *configure* time. /
- *        CMake configure 時点で取得する git 由来リビジョン文字列。
- * @details `git describe --tags --always --dirty --long` — nearest tag,
- *          commits-since, short hash, and a `-dirty` suffix if the working
- *          tree has uncommitted changes (e.g. `v2.0.0-3-gabc1234`).  Degrades
- *          to `"unknown"` outside a git checkout (release tarball).  The
- *          snapshot is taken at configure, so commits made after
- *          `cmake -B build .` are not reflected until the next configure. /
- *          git 管理外では `"unknown"`。configure 時のスナップショットのため
- *          再 configure まで最新コミットは反映されない。
+/*
+ * ★ TS_REVISION は **このヘッダには無い**。`std2/tinyState_revision.h` へ移した。
+ *
+ * 理由: このヘッダは `std2/includes.h` 経由で **全 TU が引く**。版の文字列は
+ * コミットごとに変わるので、ここに置くと install するたびに (内容が 1 行しか
+ * 違わなくても) **mtime だけで下流の全 TU が焼き直る**。利用側の実測で
+ * 884 TU ・ Linux 約 6.5 分 ・ Windows (MSYS2) は建て直し約 60 分 + 検定約 42 分
+ * (TU 数は利用側の構成で変わる。同じ相手の別構成では 662 TU ・ 約 4 分)。
+ * ⇒ このヘッダは **版では変わらない** ようにしてある (変わるのは semver と
+ *   機能検出の結果だけ)。版の取り方は `std2/tinyState_revision.h` の表を見ること。
  */
-#define TS_REVISION       "@TS_REVISION@"
 
 /** @brief Defined if `struct sockaddr` has an `sa_len` member (BSD/macOS). */
 #cmakedefine HAVE_SA_LEN

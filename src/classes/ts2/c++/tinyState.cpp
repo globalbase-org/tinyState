@@ -7,6 +7,29 @@
 #include	"ts2/c++/sThreadMutexHandleRelease.h"
 #include	"ts2/c++/sCallSection.h"
 #include	"ts2/c++/tsProbe.h"	/* 撤収プローブ: 撤収中に積みに来た相手を記録する */
+#include	"ts2/c++/stdInterval.h"	/* eventHandler() 入場時刻 (enter_time) の now() */
+#include	"ts2/c++/tsGC.h"	/* 深すぎる入れ子の逃がし先 gc->exe(obj,ev) */
+#include	"ts2/c++/ts2Revision.h"
+#include	"tinyState_revision.h"	/* ★ 版の文字列を引くのはツリー内でここだけ */
+
+#include	<cstdio>
+
+/* 版の文字列を **成果物に焼き込む**。ヘッダのマクロだけだと「何を建てたか」は
+ * 分かるが「何が動いているか」が分からない (古い lib に新しいヘッダで建てた、
+ * 静的と共有を別の木から建てた、生成ヘッダが stale — 実際に起きている)。
+ *
+ * ここ (tinyState.cpp) に置くのは **常に引かれる TU だから**。専用の TU に分けると
+ * 誰も参照しないので静的リンクで落ちる。外部リンケージの配列にしてあるので
+ * `nm` でも `strings` でも消費側のバイナリから読める。 */
+const char	ts2_revision_string[] = "tinyState " TS_REVISION;
+
+const char *
+ts2_revision()
+{
+	/* 先頭の "tinyState " を飛ばして describe の出力そのままを返す。
+	 * 接頭辞は strings で拾うときの目印で、返す値には含めない。 */
+	return ts2_revision_string + sizeof("tinyState ") - 1;
+}
 
 CLASS_TINYSTATE(tinyState,)
 
@@ -219,6 +242,60 @@ private:
 protected:
 	sPtr<stdThreadInfo> 			thrInfo;
 
+	/**
+	 * @brief この eventHandler() が入場した時刻 (マイクロ秒)。協調的に長いループを
+	 *        切り上げるために状態関数から読む。
+	 *        / Microsecond timestamp at which this eventHandler() dispatch was entered;
+	 *        read it from a state function to break out of a long loop cooperatively.
+	 * @details
+	 * `stdInterval::now()` と同じ尺度・同じ単位 (マイクロ秒) なので、状態関数の中から
+	 * そのまま差を取れる。<br>
+	 * <br>
+	 * **用途**: 状態遷移関数の中に長いループ (生成コードの for/while など) が要ることが
+	 * ある。長い、まして無限のループに入ると、その間この スレッドは占有されたままなので
+	 * 他の tinyState 派生クラスが動けなくなる。これはユーザが書くコードなので
+	 * フレームワーク側では防げない。そこで、そうなり得るループを書く側がこの値を読んで、
+	 * 予算を超えたら自分でループを抜ける。<br>
+	 * <br>
+	 * **抜ける書き方**: `rDO` **無し**の `return` がスレッドを返す道。`rDO|` 付きの
+	 * return は同じディスパッチの中で次の状態へ進むだけで、スレッドは手放さない。
+	 * 起こし直しは `application->gc->exe(ifThis)` (他の仕事の後ろに並び直す) か
+	 * `stdInterval::wait()` を使う。<br>
+	 * <br>
+	 * @code{.cpp}
+	 * TS_STATE(ACT_LOOP)
+	 * {
+	 *     for ( ; ; ) {
+	 *         if ( enter_time + 100*1000 < stdInterval::now() )
+	 *             break;              // 0.1 秒使った → いったん譲る
+	 *         if ( one_step() == DONE )
+	 *             return rDO|ACT_DONE;
+	 *     }
+	 *     application->gc->exe(ifThis);   // 順番の最後に並び直す
+	 *     return ACT_LOOP_WAIT;           // ★ rDO 無し = ここでスレッドを返す
+	 * }
+	 * TS_STATE(ACT_LOOP_WAIT)
+	 * {
+	 *     R_TEST                          // gc からの TSE_RETURN を待つ
+	 *     return rDO|ACT_LOOP;            // 入場し直しているので enter_time は更新済み
+	 * }
+	 * @endcode
+	 *
+	 * @note 打たれるのは**最外周の入場時だけ**。state_lock を既に持っている間の
+	 *       再入呼び出しはイベントを積んですぐ戻るので、更新しない。したがってこの値が
+	 *       表すのは「このオブジェクトがスレッドを連続して占有し始めた時刻」であって、
+	 *       個々の状態関数の開始時刻ではない。`rDO` の連鎖も、キューに溜まった複数
+	 *       イベントの処理も、同じ入場の内側なので同じ値のままになる。占有時間の予算と
+	 *       しては、これがそのまま測りたいものになっている。
+	 * @note 取得コストは 1 ディスパッチあたり約 13ns (実測。1 回分の差は
+	 *       ディスパッチのばらつきに埋もれるので、状態関数から 20 回呼んで傾きから
+	 *       割り出した: +261.4ns / 20)。ディスパッチ本体が約 2.16us なので **+0.6%**。
+	 *       `stdInterval::now()` は 2026-10-02 に無ロック化 (CAS) してあり、
+	 *       スレッド数を増やしても劣化しない (mutex 版は 8 スレッドで約 86ns、
+	 *       CAS 版は約 1.3ns)。
+	 */
+	INTEGER64			enter_time;
+
 	virtual sPtr<stdEvent> 	filter(sPtr<stdEvent>  inp);
 	sPtr<stdEvent> _delEvent();
 	sPtr<stdEvent> delEvent();
@@ -333,6 +410,7 @@ tinyState_::inherit(sPtr<tinyState>  parent)
 
 		this->_state.store(INI_START,std::memory_order_release);
 		this->state_lock = 0;
+		this->enter_time = 0;
 		this->invoke_state_flag = 0;
 		this->objId = getSeq();
 
@@ -374,7 +452,10 @@ tinyState_::appMtxLock()
 	if ( mtxLock_flag )
 		return;
 	mtxLock_flag = 1;
-	application->mtx.lock();
+	/* ★ 戻り値を見ていなかった。失敗は *正の errno* で来るので、取れていない
+	 * のに flag を立てたまま先へ進む形になっていた。 */
+	if ( application->mtx.lock() != 0 )
+		stdObject::panic("appMtxLock failed");
 }
 
 void
@@ -383,7 +464,12 @@ tinyState_::appMtxUnlock()
 	if ( mtxLock_flag == 0 )
 		return;
 	mtxLock_flag = 0;
-	application->mtx.unlock();
+	/* ★★ ここが「レベルの置き忘れ」を現場で捕まえる唯一の点。flag が立って
+	 * いるのに unlock が EPERM で断られたら、この object の分として数えた
+	 * レベルを実は別スレッドが持っている = 対応が崩れている。旧コードは
+	 * 戻り値を捨てていたので、崩れたまま静かに走り続けた。 */
+	if ( application->mtx.unlock() != 0 )
+		stdObject::panic("appMtxUnlock: not the owner — app-mutex bookkeeping is broken");
 }
 
 const char *
@@ -684,9 +770,155 @@ sPtr<stdEvent>  ret;
 TS_STATE_FUNC func;
 TS_STATE_TYPE state;
 sCallSectionNode csn(ifThis);
+/* 入れ子の深さを数えるガード。入口で +1 / この関数の**本当の出口**で -1。
+ *
+ * ★ sCallSection の push/pop に連動させてはいけない。pop は下の invoke_state()
+ * の **前**にあるので、listener 連鎖では C スタックが伸び続けるのに段数が戻り、
+ * カウンタが浅いまま張り付く。RAII なら早期 return (C_ZOM / state_lock 再入 /
+ * 下の逃がし) でも正しく戻る。
+ *
+ * TLS を引くのはここの 1 回だけ。push/pop もこの csec を使い回すので、
+ * 従来 (sCallSection::key-> を 2 回) より引く回数は増えない。 */
+sCallSectionDepth __depth;
+sCallSection * csec = __depth.section();
 /* lm 内で他オブジェクトを呼ばないため、スレッドプールへの投入と起床は
  * スコープ外へ回す。この呼び出しで実際にキューへ積んだときだけ真。 */
 int do_ins = 0;
+
+	/* ---- 入れ子が深すぎたら、イベントごと gc へ逃がす ----
+	 *
+	 * eventHandler は入れ子に呼ばれる (親への TSE_RETURN・listener 通知)。
+	 * state_lock は**同一オブジェクトの再入**しか止めないので A→B→C の連鎖は
+	 * 無制限に深くなれ、スタックを食い尽くすと**何も出さずに** SIGSEGV で死ぬ。
+	 * 上限を超えた入場は ev ごと gc のキューへ回す。gc 経由の再投入は深さ 1 から
+	 * 始まるので、長い連鎖は「上限 × gc 往復」に分割されて前進する。
+	 *
+	 * ★ 判定は _insEvent(ev) の**前**。ここで逃がす ev はこのオブジェクトの
+	 * キューには入れず、gc が持って行く (二重に配送しないため)。
+	 *
+	 * ★ lm は取っていない。gc->exe() は他オブジェクトの呼び出しなので lm の下では
+	 * 呼べず (鉄則 3 / 末尾の do_ins と同じ理由)、ここは lm を取る前に済ませる。
+	 * そのぶん application の読み出しは無同期で、撤収中に thNULL へ変わり得る
+	 * 窓がある — 末尾の do_ins ブロックが既に抱えている窓と同じ性質のもので、
+	 * null チェック付きで読み、null なら「逃がさず従来どおり再帰する」に倒す。
+	 * 落とすのは不可。
+	 *
+	 * ★ C_ZOM の判定より前にある。既に ZOM のオブジェクトを深い所で叩くと gc 経由に
+	 * 1 往復するが、入場し直した先の C_ZOM 判定が 0 を返して終わるだけで無害。
+	 *
+	 * ★ _thrInfo != thNULL のときは逃がさない。それは**プール自身のディスパッチ**で、
+	 * worker は既に自分のキューから降ろしている。ここで ev へ化かすと
+	 * thrQueueing_flag が「プールが持っている」と言い続け、state_lock を持つ
+	 * スレッドが TS_THREAD 状態で止まったまま誰も ins() し直さない。
+	 * そもそも worker の最外周は深さ 1 なので、下の条件には届かない。 */
+	if ( _thrInfo == thNULL && __depth.depth() > 1 ) {
+	int limit = 0;
+	/* ★ 1 回だけ読んでローカルに取る。C_TEST は引数を **2 回評価する**マクロで、
+	 * 1 回目が非 0・2 回目が 0 になると (TS_TRANS*)0 を参照して落ちる。 */
+	TS_STATE_TYPE st_now = this->_state;
+		/* 深さ 1 はここに来ない。上限は必ず 1 以上なので最外周は絶対に超えず、
+		 * 判定そのものが要らない (= 既定構成のディスパッチの大半で
+		 * application の参照と上限の取得をまるごと省ける)。
+		 * これは前進の保証でもある: 最外周は必ず走る。 */
+		if ( this->application.is_notNull() )
+			limit = this->application->evh_depth;	/* 明示指定が勝つ */
+		if ( limit <= 0 )
+			limit = __depth.limit();		/* 無指定 = 機ごとに自動 */
+		/* ★★ **INI 段のディスパッチは逃がさない。**
+		 *
+		 * ★ **仕様**: `TS_STATE(INI_START)` とそこから `rDO` で繋がった連鎖は
+		 * **`thNEW` の中で走り切る** (COOKBOOK §10 / CLAUDE.md)。呼び手は次の行から
+		 * 使える。`TS_THREAD(INI_START)` と「INI_START の中で yield した場合」だけが
+		 * その限りではない (どちらも元から非同期で、呼び手も待つ形に書く)。
+		 *
+		 * TSE_INIT を gc へ回すと thNEW は **INI_START が走る前に**返り、
+		 * **その保証が壊れて**中身が空のオブジェクトが配られる。実際に落ちた形 (B 検証):
+		 *
+		 *   tsSignal の INI_START が tsSignalCore::ins_front() を呼ぶ
+		 *     -> その tsSignalCore は直前に thNEW されたもので、**TSE_INIT が
+		 *        逃がされていた**ので INI_START がまだ走っておらず、内部の
+		 *        stdQueue が未生成
+		 *     -> stdQueue_<tsSignal>::ins() -> stdObject::addref() で SEGV
+		 *
+		 * 利用側の実アプリでも同じ顔 (tsSignal / tsSignalCore など、
+		 * すべて起動時の INI) で落ち、深さを変えると結果が単調に変わらない = レース
+		 * だった。⇒ **構築中は再帰するしかない。**
+		 *
+		 * ⚠ 代償: **構築の連鎖 (INI_START の中で thNEW する形) は守れない。**
+		 * ★ これは直せない穴ではなく、**上の仕様を守った結果**である (仕様として決着)。
+		 * 保証を取るか深さを取るかの択で、保証を取っている。深さが要る利用側は
+		 * `TS_THREAD(INI_START)` にするか「作ってから起こす」に分ける。
+		 * この機構が守るのは「出来上がったオブジェクト同士のイベント連鎖」
+		 * (親への TSE_RETURN ・ listener 通知 ・ wakeup ・ gc/fwIO からの配送) で、
+		 * そこが「再帰の発生源」として挙がっているものと一致する。
+		 * 構築の連鎖は本質的に同期なので、深さを稼ぎたければ利用側が
+		 * 「作ってから起こす」形に分けるしかない。
+		 *
+		 * ★ 0 も INI とみなされる (C_TEST は x==0 を C_INI として扱う) ので、
+		 * state がまだ設定されていない最初期も自動的にここで止まる。 */
+		if ( __depth.depth() > limit && C_TEST(st_now,C_INI) ) {
+			/* ★★ 上限を超えているが **INI 段なので逃がせない** (理由は下の
+			 * 長いコメント)。逃がせないからといって**黙って進んではいけない**:
+			 * 構築の連鎖はこのまま深くなり、スタックを使い切ったところで
+			 * **何も出さずに** SIGSEGV で死ぬ。この安全網の題は「沈黙死を防ぐ」
+			 * なので、**逃がせない側も沈黙はやめる**。
+			 *
+			 * ★ panic ではなく記録に留める理由: 1 段の見込み 4KB は実測 672B の
+			 * 約 6 倍なので、上限を超えても**まだ実容量には遠い** (8MB の機では
+			 * 上限 1500 に対して実際は約 12,800 段入る)。ここで止めると、
+			 * 動いていたアプリを落とすことになる。⇒ 早めに**警告**し、
+			 * 本当に足りなければ従来どおり落ちる。
+			 *
+			 * ★ 出すのは一度だけ。構築の連鎖は 1 段ごとにここを通るので、
+			 * 毎回出したら出力で埋まる。 */
+		static int reported_ini = 0;
+			if ( reported_ini == 0 ) {
+				reported_ini = 1;
+				::fprintf(stderr,
+					"tinyState: eventHandler nesting is at %d,"
+					" past the cap of %d, in an INI dispatch of %s."
+					" A construction chain cannot be deferred to the GC,"
+					" so a deeper one dies without a message."
+					" Split it into \"build, then fire\".\n",
+					__depth.depth(),limit,this->getClass());
+			}
+		}
+		else if ( __depth.depth() > limit ) {
+		sPtr<tsGC>  gc;
+			if ( this->application.is_notNull() )
+				gc = this->application->gc;
+			/* ★★ gc 自身は逃がさない。逃がし先が自分なので、
+			 *
+			 *   eventHandler(深い) -> gc->exe(obj,ev) -> wakeup()
+			 *     -> gc の eventHandler(深さ +1 ・ これも上限超え)
+			 *       -> gc->exe(gc,ev) -> wakeup() -> ... 無限再帰
+			 *
+			 * となってスタックを食い尽くす (実測: evh_depth=2 の 100 段で
+			 * 即 SIGSEGV。bt は _ins -> exe -> wakeup -> eventHandler の
+			 * 4 フレーム周期)。gc の入場は上限を無視して従来どおり再帰する。
+			 * gc の状態機械は自分の予算 (interval()) で切り上げるので、
+			 * ここで深さを見なくても スレッドを抱え込み続けはしない。
+			 *
+			 * exe() の wakeup() がこの深いスタックで gc の状態機械を
+			 * 走らせてしまう心配は要らない: gc は ACT_RET / ACT_START で
+			 * TSE_RETURN を待っているので、TSE_WAKEUP は R_TEST に弾かれて
+			 * すぐ戻る。実際の配送は 0 遅延タイマの TSE_RETURN を届ける
+			 * スレッドが、深さ 1 から行う。 */
+			if ( gc.is_notNull() && gc != ifThis ) {
+				/* 逃がしたことを記録する。既定は数えるだけで、
+				 * TS2_EVH_PROBE を設定すると 1 件 1 行 stderr に出る。
+				 * 狙いは「このアプリは本当に上限へ届いているのか」を
+				 * 測れるようにすること。 */
+			INTEGER64 seq = tsProbeEvhEscape(ifThis,
+						ev.is_notNull() ? ev->type : 0,
+						__depth.depth(),limit);
+				gc->exe(ifThis,ev,seq);
+				return 0;	/* 戻り値を見ている呼び出し元は無い */
+			}
+			/* 逃がし先が無い (撤収中で application / gc が畳まれた) →
+			 * 従来どおり再帰する。深い鎖のまま進むしかないが、落とさない。 */
+		}
+	}
 
 	{
 	sThreadMutexHandle __hdr(lm);
@@ -707,8 +939,13 @@ int do_ins = 0;
 			return 0;
 		}
 		this->state_lock = 1;
+		/* 入場時刻を打つ。状態関数が長いループを自分で切り上げるための基準で、
+		 * 読み手は enter_time のコメント参照。state_lock を取れた呼び出し =
+		 * 最外周だけがここへ来るので、再入では更新されない (それが欲しい意味:
+		 * 「このオブジェクトがスレッドを占有し始めた時刻」)。 */
+		this->enter_time = stdInterval::now();
 		thrInfo = _thrInfo;
-		sCallSection::key->push(&csn);
+		csec->push(&csn);
 
 		for ( ; ; ) {
 			for ( ; ; ) {
@@ -792,7 +1029,7 @@ int do_ins = 0;
 				break;
 		}
 
-		sCallSection::key->pop(&csn);
+		csec->pop(&csn);
 		appMtxUnlock();
 		thrInfo = thNULL;
 		this->state_lock = 0;

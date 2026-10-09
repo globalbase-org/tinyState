@@ -50,6 +50,7 @@
 
 
 #define TS_PROBE_TAG		"TS2-PROBE"
+#define TS_EVH_TAG		"TS2-EVH"
 #define TS_PROBE_MAXDEPTH	64
 #define TS_PROBE_CHAINMAX	32
 #define TS_PROBE_BUFSIZE	8192
@@ -342,4 +343,119 @@ int		dropped_now = 0;
 
 	if ( c.do_abort )
 		::abort();
+}
+
+
+/*******************************************
+	深すぎる入れ子を gc へ逃がした記録
+********************************************/
+
+/* 延べ件数。環境変数とは無関係に常に数える。POD なのでデストラクタは登録されない
+ * (tinyState は破棄される static を 1 つも作らない — sImmortal.h / ctest の
+ * tinyState_no_static_dtor)。 */
+static volatile INTEGER64	evh_escapes;
+static volatile INTEGER64	evh_delivers;
+static volatile int		evh_lines;
+static volatile int		evh_dlines;
+/* ★ 「打ち切った」と言ったかのフラグは **逃がし側と配送側で別に持つ**。
+ * 行数カウンタ (evh_lines / evh_dlines) を分けておきながらここを共有すると、
+ * 先に打ち切った片方が言った時点でもう片方が**黙って切る**ことになり、
+ * 行を数えた人が件数を取り違える。実際に配送側が黙っていて、利用側が逃がし数を
+ * 1 桁取り違えた。数える側から見た不変条件は「打ち切ったら必ず言う」。 */
+static volatile int		evh_said_cut;
+static volatile int		evh_said_dcut;
+
+struct tsEvhCfg {
+	int	on;	/* TS2_EVH_PROBE が設定されている */
+	int	max;	/* 行数の上限。0 = 無制限 */
+};
+
+static tsEvhCfg
+evh_cfg_init()
+{
+tsEvhCfg c;
+const char * v = ::getenv("TS2_EVH_PROBE");
+	c.on  = (v && *v) ? 1 : 0;
+	c.max = probe_env_int("TS2_EVH_PROBE_MAX",64);
+	if ( c.max < 0 )
+		c.max = 0;
+	return c;
+}
+
+static const tsEvhCfg &
+evh_cfg()
+{
+static const tsEvhCfg c = evh_cfg_init();
+	return c;
+}
+
+INTEGER64
+tsProbeEvhEscapeCount()
+{
+	return evh_escapes;
+}
+
+INTEGER64
+tsProbeEvhDeliverCount()
+{
+	return evh_delivers;
+}
+
+/* ★ ここは逃がしの経路から、**lm を持たずに**呼ばれる (tinyState.cpp の深さガードは
+ * lm を取る前に居る)。getClass() は相手のロックを取らないので安全。
+ * 相手の状態名は引かない — getStateName() は lm を取るので、呼び出し規約が変わる。 */
+INTEGER64
+tsProbeEvhEscape(sPtr<tinyState> job,int evtype,int depth,int limit)
+{
+const tsEvhCfg & c = evh_cfg();
+INTEGER64 seq;
+	seq = __sync_add_and_fetch(&evh_escapes,1);
+	if ( !c.on )
+		return seq;
+	if ( c.max ) {
+		if ( __sync_add_and_fetch(&evh_lines,1) > c.max ) {
+			if ( __sync_val_compare_and_swap(&evh_said_cut,0,1) == 0 )
+				::fprintf(stderr,"%s escape (以降は打ち切り: %d 行)\n",
+						TS_EVH_TAG,c.max);
+			return seq;
+		}
+	}
+	::fprintf(stderr,"%s escape seq=%lld class=%s ev=0x%x depth=%d limit=%d tid=%llu\n",
+			TS_EVH_TAG,(long long)seq,
+			job.is_notNull() ? job->getClass() : "(null)",
+			(unsigned)evtype,depth,limit,probe_tid());
+	::fflush(stderr);
+	return seq;
+}
+
+/* 配送側。逃がし側の seq と 1 対 1 に対応する。
+ *
+ * ★ 行数の打ち切りは逃がし側と**別に**数える (同じ上限を別々に当てる)。
+ * 同じカウンタを共有すると、揃っているかを数えたい当人が打ち切りで数を崩す。
+ * `TS2_EVH_PROBE_MAX=0` にすれば両方とも全件出る。
+ *
+ * ★★ 打ち切ったら**必ず 1 度言う** (逃がし側と対称)。行の数は件数ではないので、
+ * 黙って切ると「64 件だった」と読まれる。件数が要るだけなら
+ * `tsProbeEvhEscapeCount()` / `tsProbeEvhDeliverCount()` を使う方が確実
+ * (環境変数と無関係に常に数えていて、打ち切りの影響を受けない)。 */
+void
+tsProbeEvhDeliver(sPtr<tinyState> job,int evtype,INTEGER64 seq)
+{
+const tsEvhCfg & c = evh_cfg();
+	__sync_add_and_fetch(&evh_delivers,1);
+	if ( !c.on )
+		return;
+	if ( c.max ) {
+		if ( __sync_add_and_fetch(&evh_dlines,1) > c.max ) {
+			if ( __sync_val_compare_and_swap(&evh_said_dcut,0,1) == 0 )
+				::fprintf(stderr,"%s deliver (以降は打ち切り: %d 行)\n",
+						TS_EVH_TAG,c.max);
+			return;
+		}
+	}
+	::fprintf(stderr,"%s deliver seq=%lld class=%s ev=0x%x tid=%llu\n",
+			TS_EVH_TAG,(long long)seq,
+			job.is_notNull() ? job->getClass() : "(null)",
+			(unsigned)evtype,probe_tid());
+	::fflush(stderr);
 }
